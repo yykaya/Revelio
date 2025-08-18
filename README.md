@@ -1,8 +1,27 @@
 # Revelio 🪄 — Lightweight Methylation-Context Predictor
 
-**Revelio** (HP charm for revealing hidden things) quickly scans FASTA/FASTQ to identify cytosine contexts **CG / CHG / CHH** and assigns a **sequence-based prior probability** to each candidate site (either a simple heuristic or a user-provided logistic **k-mer** weight table). It’s designed for **fast triage** and **candidate region ranking** before heavier signal-level methylation callers.
+<table>
+  <tr>
+    <td width="260" valign="top" style="padding-right:16px;">
+      <img src="revelio.png"
+           alt="Revelio — Lightweight Methylation-Context Predictor"
+           width="240">
+    </td>
+    <td valign="top">
+      <strong>Revelio</strong> (HP charm for revealing hidden things) quickly scans
+      FASTA/FASTQ to identify cytosine contexts <strong>CG / CHG / CHH</strong> and assigns a
+      <strong>sequence-based prior probability</strong> to each candidate site (either a simple
+      heuristic or a user-provided logistic <strong>k-mer</strong> weight table). It’s designed for
+      <strong>fast triage</strong> and <strong>candidate region ranking</strong> before heavier
+      signal-level methylation callers.
+      <br><br>
+      <blockquote>⚠️ Revelio uses <strong>sequence context only</strong> (no raw signal). For
+      signal-level calling on ONT data, use tools such as Remora/Dorado, Megalodon, or DeepSignal-plant.</blockquote>
+    </td>
+  </tr>
+</table>
 
-> ⚠️ Revelio uses **sequence context only** (no raw signal). For signal-level calling on ONT data, use tools such as Remora/Dorado, Megalodon, or DeepSignal-plant.
+
 
 **Status:** research prototype (v0.1.0) • **Developer:** Yasin Kaya, MPIPZ (ykaya@mpipz.mpg.de | yyasinkkaya@gmail.com) • **License:** MIT
 
@@ -192,7 +211,7 @@ Guidelines:
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [https://github.com/yykaya/Revelio/blob/main/LICENSE](LICENSE).
 
 ---
 
