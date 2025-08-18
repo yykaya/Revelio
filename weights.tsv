@@ -1,0 +1,32 @@
+# weights.tsv — starter logistic weights (k=5)
+# Format (TSV, no header):
+#   BIAS   <float>              # optional global bias (logit intercept)
+#   <context>  <kmer>  <weight> # context in {CG,CHG,CHH}; kmer length must equal -k and be centered on 'C'
+#
+# Probability is computed as: p = 1 / (1 + exp(-(BIAS + weight(context,kmer))))
+
+BIAS	0.0
+
+# --- CG examples (5-mer, center=C, +1=G): ??CG?
+CG	TTCGA	2.20
+CG	AACGA	2.00
+CG	AGCGT	2.10
+CG	TGCGC	2.30
+CG	ACCGT	1.70
+CG	CCCGC	2.40
+
+# --- CHG examples (5-mer, center=C, +1∈{A,C,T}, +2=G): ??CHG
+CHG	AACAG	1.10
+CHG	TTCTG	0.95
+CHG	GCCAG	1.05
+CHG	ACCTG	1.00
+CHG	CTCAG	0.90
+CHG	CACCG	0.85
+
+# --- CHH examples (5-mer, center=C, +1,+2∈{A,C,T}): ??CHH
+CHH	AACCA	0.40
+CHH	TTCTA	0.35
+CHH	GACAT	0.30
+CHH	CACAA	0.28
+CHH	ACCTT	0.32
+CHH	TCCTA	0.33
