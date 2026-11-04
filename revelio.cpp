@@ -574,8 +574,7 @@ inline void profile_sequence(const std::string& id,
 int main(int argc, char* argv[]) {
     using namespace rv;
 
-    std::ios::sync_with_stdio(false);
-    std::cin.tie(nullptr);
+    std::ios::sync_with_stdio(false);   // faster std::cout; stdin goes through StdinBuf
 
     Options opt;
     const int cli_rc = parse_cli(argc, argv, opt);
@@ -693,6 +692,10 @@ int main(int argc, char* argv[]) {
     if (!*out) {
         std::cerr << "Error: failed writing output (disk full or closed pipe?)\n";
         return 3;
+    }
+    if (opt.infile == "-" && std::ferror(stdin)) {   // fread gives 0 on error as at EOF
+        std::cerr << "Error: failed reading stdin; output is incomplete\n";
+        return 2;
     }
     return 0;
 }
