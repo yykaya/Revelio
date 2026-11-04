@@ -23,6 +23,8 @@
 
 
 
+[![CI](https://github.com/yykaya/Revelio/actions/workflows/ci.yml/badge.svg)](https://github.com/yykaya/Revelio/actions/workflows/ci.yml)
+
 **Status:** research prototype (v0.2.0) • **Developer:** Yasin Kaya, MPIPZ (ykaya@mpipz.mpg.de | yyasinkkaya@gmail.com) • **License:** MIT
 
 ---
