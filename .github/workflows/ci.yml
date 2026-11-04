@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / ${{ matrix.cxx }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cxx: g++
+          - os: macos-latest
+            cxx: clang++
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (warnings as errors)
+        run: make CXX=${{ matrix.cxx }} CXXFLAGS="-std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror"
+
+      - name: Test
+        run: make test
+
+      - name: Build with sanitizers and test again
+        run: |
+          make clean
+          make debug CXX=${{ matrix.cxx }}
+          bash tests/run_tests.sh ./revelio
