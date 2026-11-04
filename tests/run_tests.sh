@@ -78,6 +78,15 @@ r2	3	CHG	+	TTCTG	0.550000
 r2	5	CHG	-	TTCAG	0.550000
 EOF
 
+# --window 10 on t.fa: hand-checked counts, GC and CpG o/e
+printf 'seq_id\tstart\tend\tn_acgt\tgc\tcpg_oe\tCG_plus\tCG_minus\tCHG_plus\tCHG_minus\tCHH_plus\tCHH_minus\tp_CG\tp_CHG\tp_CHH\n' > "$TMP/exp_win.tsv"
+cat >> "$TMP/exp_win.tsv" <<'EOF'
+chr1	0	10	10	0.5000	1.6667	1	1	1	1	1	0	0.850000	0.550000	0.250000
+chr1	10	20	10	0.4000	0.0000	0	0	1	1	2	0	NA	0.550000	0.250000
+chr1	20	22	2	0.0000	NA	0	0	0	0	0	0	NA	NA	NA
+chr2	0	6	6	0.6667	2.0000	1	1	0	0	0	0	0.850000	NA	NA
+EOF
+
 # ---- output correctness ----
 expect_out "FASTA file, heuristic, header, id trimmed" "$TMP/exp_heur.tsv" "$BIN" -i "$TMP/t.fa" --heuristic --header
 expect_out "stdin via pipe (-i -)"            "$TMP/exp_heur_nohdr.tsv" sh -c "cat '$TMP/t.fa' | '$BIN' -i - --heuristic"
@@ -90,6 +99,22 @@ expect_out "model scoring"                    "$TMP/exp_model.tsv" sh -c "'$BIN'
 expect_out "--strand + (forward only)"        "$TMP/exp_plus.tsv"  "$BIN" -i "$TMP/t.fa" --heuristic --strand +
 expect_out "--strand - (reverse only)"        "$TMP/exp_minus.tsv" "$BIN" -i "$TMP/t.fa" --heuristic --strand -
 expect_out "per-context BIAS_<ctx> rows"      "$TMP/exp_ctxbias.tsv" sh -c "'$BIN' -i '$TMP/t.fa' --model '$TMP/ctxbias.tsv' | head -4"
+expect_out "--window profile"                 "$TMP/exp_win.tsv" "$BIN" -i "$TMP/t.fa" --heuristic --window 10 --header
+
+# window counts must equal the per-site rows of the same command
+EX=$(dirname "$0")/../examples/col0_chr1_3631-4630.fa
+WT=$(dirname "$0")/../weights.tsv
+for args in "--heuristic" "--model $WT --strand -" "--heuristic --contexts CHG,CHH -k 7"; do
+    sites=$("$BIN" -i "$EX" $args | awk -F'\t' '{n[$3 $4]++} END{for(k in n) printf "%s=%d ", k, n[k]}' | tr ' ' '\n' | sort | tr '\n' ' ')
+    wins=$("$BIN" -i "$EX" $args --window 137 | awk -F'\t' '{a+=$7;b+=$8;c+=$9;d+=$10;e+=$11;f+=$12}
+        END{if(a)printf "CG+=%d\n",a; if(b)printf "CG-=%d\n",b; if(c)printf "CHG+=%d\n",c; if(d)printf "CHG-=%d\n",d; if(e)printf "CHH+=%d\n",e; if(f)printf "CHH-=%d\n",f}' | sort | tr '\n' ' ')
+    if [ "$sites" = "$wins" ] && [ -n "$sites" ]; then ok "window counts = site rows ($args)"; else bad "window counts = site rows ($args): $sites vs $wins"; fi
+done
+# overlapping windows: every window = sum of its non-overlapping halves
+"$BIN" -i "$EX" --heuristic --window 100 --step 50 | awk -F'\t' '$3-$2==100{print $2, $7+$8+$9+$10+$11+$12}' > "$TMP/w100"
+"$BIN" -i "$EX" --heuristic --window 50 | awk -F'\t' '{n[$2]=$7+$8+$9+$10+$11+$12} END{for(s in n) print s, n[s]}' > "$TMP/w50"
+if awk 'NR==FNR{h[$1]=$2; next} {if(h[$1]+h[$1+50]!=$2) bad++} END{exit bad>0}' "$TMP/w50" "$TMP/w100"; then ok "--step windows = sum of blocks"; else bad "--step windows = sum of blocks"; fi
+
 expect_out "--kmer/--input/-o aliases"        "$TMP/exp_heur_nohdr.tsv" sh -c "'$BIN' --input '$TMP/t.fa' --kmer 5 --heuristic -o '$TMP/o.tsv' && cat '$TMP/o.tsv'"
 
 # ---- exit codes ----
@@ -107,6 +132,9 @@ expect_rc "model bad context exits 2"      2 "$BIN" -i "$TMP/t.fa" --model "$TMP
 expect_rc "model mixed k exits 2"          2 "$BIN" -i "$TMP/t.fa" --model "$TMP/mixk.tsv"
 expect_rc "bad --strand exits 1"           1 "$BIN" -i "$TMP/t.fa" --strand x
 expect_rc "unknown BIAS_ row exits 2"      2 "$BIN" -i "$TMP/t.fa" --model "$TMP/badbias.tsv"
+expect_rc "--step without --window exits 1"  1 "$BIN" -i "$TMP/t.fa" --step 5
+expect_rc "--window not multiple of step"   1 "$BIN" -i "$TMP/t.fa" --window 10 --step 3
+expect_rc "--window 0 exits 1"              1 "$BIN" -i "$TMP/t.fa" --window 0
 expect_rc "--heuristic + --model exits 1"  1 "$BIN" -i "$TMP/t.fa" --heuristic --model "$TMP/w5.tsv"
 
 echo "# $pass passed, $fail failed"

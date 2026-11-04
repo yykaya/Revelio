@@ -25,7 +25,7 @@
 
 [![CI](https://github.com/yykaya/Revelio/actions/workflows/ci.yml/badge.svg)](https://github.com/yykaya/Revelio/actions/workflows/ci.yml)
 
-**Status:** research prototype (v0.2.0) • **Developer:** Yasin Kaya, MPIPZ (ykaya@mpipz.mpg.de | yyasinkkaya@gmail.com) • **License:** MIT
+**Status:** research prototype (v0.3.0) • **Developer:** Yasin Kaya, MPIPZ (ykaya@mpipz.mpg.de | yyasinkkaya@gmail.com) • **License:** MIT
 
 ---
 
@@ -33,6 +33,7 @@
 
 - **Fast, portable, single binary.** Streams large genomes/reads in one pass.
 - **Both strands.** Reports cytosines on the + and − strand (`--strand both|+|-`).
+- **Window profiles.** `--window`/`--step` summarise a genome or locus into chunks: context counts per strand, GC, CpG o/e and mean prior per window.
 - **Context-aware priors.** Pick a quick **heuristic** or supply your own **logistic k-mer weights** with per-context intercepts.
 - **FASTA/FASTQ auto-detection.** Handles multi-line FASTA and 4-line FASTQ.
 - **Practical TSV output**: `seq_id, pos_1based, context, strand, kmer, prob`.
@@ -116,7 +117,7 @@ python3 docs/make_example_figure.py   # redraws docs/example_sites.png (needs ma
 
 ## Usage
 ```text
-revelio 0.2.0 — lightweight methylation context predictor
+revelio 0.3.0 — lightweight methylation context predictor
 Usage:
   revelio -i <input.fa|fq|-> [--fasta|--fastq] [-k 5]
           [--heuristic | --model weights.tsv]
@@ -131,6 +132,8 @@ Options:
       --model <tsv>       Use logistic weights table
       --contexts <list>   Comma-separated subset (CG,CHG,CHH); default: all
       --strand <s>        both | + | - (default: both)
+      --window <bp>       Write one profile row per window instead of one row per site
+      --step <bp>         Window step (default: --window; --window must be a multiple)
       --header            Print header line in TSV output
   -o, --out <path>        Write to file (default: stdout)
   -h, --help              Show help and exit
@@ -149,6 +152,35 @@ Chr1:3631-4630  118     CG      -       ACCGT   0.937027
 ```
 
 > Note: a minus-strand site is reported at the + strand coordinate of its **G** (the C on the reverse strand), and its `kmer` and context are read 5'→3' on the minus strand. A CG dinucleotide therefore gives two rows (C at `pos`, `+`; G at `pos+1`, `-`). Use `--strand +` for the v0.1 forward-only behaviour.
+
+---
+
+## Window profiles (`--window`)
+
+For a quick, alignment-free scan of a genome or locus, `--window <bp>` writes one row per window instead of one row per site. `--step <bp>` makes windows overlap (`--window` must be a multiple of `--step`). The usual `--contexts`, `--strand`, `-k` and `--heuristic`/`--model` options apply. The site counts always equal the per-site rows of the same command.
+
+```bash
+./revelio -i examples/col0_chr1_3631-4630.fa --model weights.tsv --window 200 --header
+```
+
+```text
+seq_id          start  end   n_acgt  gc      cpg_oe  CG_plus  CG_minus  CHG_plus  CHG_minus  CHH_plus  CHH_minus  p_CG      p_CHG     p_CHH
+Chr1:3631-4630  0      200   200     0.4350  1.5135  14       14        7         8          16        28         0.754237  0.377541  0.185485
+Chr1:3631-4630  200    400   200     0.4000  1.2788  10       10        8         6          16        30         0.754216  0.413342  0.182426
+Chr1:3631-4630  400    600   200     0.4450  0.6494  6        6         8         9          19        41         0.748223  0.407024  0.183547
+Chr1:3631-4630  600    800   200     0.3100  0.4167  2        2         6         6          22        24         0.731059  0.436800  0.187676
+Chr1:3631-4630  800    1000  200     0.4200  0.3419  3        3         9         9          33        27         0.770500  0.404097  0.185846
+```
+
+| Column | Description |
+|---|---|
+| `start`, `end` | window, BED convention (0-based, half-open); the last window of a sequence can be shorter |
+| `n_acgt`, `gc` | called (non-N) bases and their GC fraction |
+| `cpg_oe` | CpG observed/expected = n(CG)·n_acgt / (n(C)·n(G)) (Gardiner-Garden & Frommer 1987); `NA` without C or G |
+| `CG_plus` … `CHH_minus` | site counts per context and strand |
+| `p_CG`, `p_CHG`, `p_CHH` | mean prior per context; `NA` when the window has no such site |
+
+CpG o/e is a sequence-level footprint of methylation history: methylated CpGs mutate to TpG through deamination, so long-term CG methylation depletes CpG. In the example, o/e is high at the 5' end of AT1G01010 (CpG-rich promoter/TSS) and drops to ~0.34 further into the region. Like the per-site priors, it describes the sequence and not the methylation state of a sample.
 
 ---
 
