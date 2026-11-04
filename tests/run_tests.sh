@@ -99,6 +99,11 @@ expect_out "model scoring"                    "$TMP/exp_model.tsv" sh -c "'$BIN'
 expect_out "--strand + (forward only)"        "$TMP/exp_plus.tsv"  "$BIN" -i "$TMP/t.fa" --heuristic --strand +
 expect_out "--strand - (reverse only)"        "$TMP/exp_minus.tsv" "$BIN" -i "$TMP/t.fa" --heuristic --strand -
 expect_out "per-context BIAS_<ctx> rows"      "$TMP/exp_ctxbias.tsv" sh -c "'$BIN' -i '$TMP/t.fa' --model '$TMP/ctxbias.tsv' | head -4"
+# stdin buffer refills: one 3 MB line (crosses the 1 MiB buffer twice) piped vs read from file
+awk 'BEGIN{srand(11); printf ">long\n"; for(i=0;i<3000000;i++) printf "%s", substr("ACGT", int(rand()*4)+1, 1); printf "\n"}' > "$TMP/long.fa"
+"$BIN" -i "$TMP/long.fa" --heuristic --window 100000 > "$TMP/long_file.tsv"
+expect_out "stdin across buffer refills"      "$TMP/long_file.tsv" sh -c "cat '$TMP/long.fa' | '$BIN' -i - --heuristic --window 100000"
+
 expect_out "--window profile"                 "$TMP/exp_win.tsv" "$BIN" -i "$TMP/t.fa" --heuristic --window 10 --header
 
 # window counts must equal the per-site rows of the same command
