@@ -34,6 +34,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <sstream>
 #include <iomanip>
@@ -156,6 +157,30 @@ struct Model {
 
 // ---------- FASTA/FASTQ reader ----------
 enum class FileType { FASTA, FASTQ };
+
+// std::cin on libc++ (macOS) reads stdin almost byte by byte even without stdio sync;
+// this buffer fills 1 MiB at a time with fread.
+class StdinBuf : public std::streambuf {
+public:
+    StdinBuf() : buf_(1 << 20) {}
+protected:
+    int_type underflow() override {
+        if (gptr() < egptr()) return traits_type::to_int_type(*gptr());
+        const std::size_t n = std::fread(buf_.data(), 1, buf_.size(), stdin);
+        if (n == 0) return traits_type::eof();
+        setg(buf_.data(), buf_.data(), buf_.data() + n);
+        return traits_type::to_int_type(*gptr());
+    }
+private:
+    std::vector<char> buf_;
+};
+
+// Buffered stream over stdin, for "-i -"
+inline std::istream& stdin_stream() {
+    static StdinBuf buf;
+    static std::istream in(&buf);
+    return in;
+}
 
 // Record ID = header text up to the first whitespace (as samtools/bedtools expect)
 inline std::string header_id(const std::string& line) {
@@ -549,8 +574,7 @@ inline void profile_sequence(const std::string& id,
 int main(int argc, char* argv[]) {
     using namespace rv;
 
-    std::ios::sync_with_stdio(false);
-    std::cin.tie(nullptr);
+    std::ios::sync_with_stdio(false);   // faster std::cout; stdin goes through StdinBuf
 
     Options opt;
     const int cli_rc = parse_cli(argc, argv, opt);
@@ -583,7 +607,7 @@ int main(int argc, char* argv[]) {
 
     // "-" reads stdin directly; /dev/stdin also works now that the reader never seeks
     std::ifstream fin;
-    std::istream* inp = &std::cin;
+    std::istream* inp = &stdin_stream();
     if (opt.infile != "-") {
         fin.open(opt.infile);
         if (!fin) {
@@ -668,6 +692,10 @@ int main(int argc, char* argv[]) {
     if (!*out) {
         std::cerr << "Error: failed writing output (disk full or closed pipe?)\n";
         return 3;
+    }
+    if (opt.infile == "-" && std::ferror(stdin)) {   // fread gives 0 on error as at EOF
+        std::cerr << "Error: failed reading stdin; output is incomplete\n";
+        return 2;
     }
     return 0;
 }
