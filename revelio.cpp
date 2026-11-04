@@ -13,6 +13,7 @@
   - Outputs TSV: seq_id  pos_1based  context  strand  kmer  prob
   - FASTA (multi-line) and FASTQ (4-line) support with auto-detection; reads pipes/stdin.
   - Practical CLI: --header, --contexts, --out, --version.
+  - --window/--step: per-window profiles (context counts per strand, GC, CpG o/e, mean prior).
   - seq_id is the header up to the first whitespace.
 
   Notes / Limitations
@@ -28,6 +29,8 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -38,7 +41,7 @@
 
 namespace rv {
 
-static constexpr const char* kVersion = "0.2.0";
+static constexpr const char* kVersion = "0.3.0";
 
 // ---------- small helpers ----------
 inline char up(char c) { return static_cast<char>(std::toupper(static_cast<unsigned char>(c))); }
@@ -243,6 +246,8 @@ struct Options {
     bool print_header = false;
     int  k = 5;
     std::string strand = "both";    // "both"|"+"|"-"
+    long window = 0;                // > 0: one row per window instead of per site
+    long step = 0;                  // window step (default: window)
     std::unordered_set<std::string> ctx_filter; // empty = accept all
 };
 
@@ -281,17 +286,33 @@ inline void print_help(std::ostream& os) {
     "      --model <tsv>       Use logistic weights table\n"
     "      --contexts <list>   Comma-separated subset (CG,CHG,CHH); default: all\n"
     "      --strand <s>        both | + | - (default: both)\n"
+    "      --window <bp>       Write one profile row per window instead of one row per site\n"
+    "      --step <bp>         Window step (default: --window; --window must be a multiple)\n"
     "      --header            Print header line in TSV output\n"
     "  -o, --out <path>        Write to file (default: stdout)\n"
     "  -h, --help              Show help and exit\n"
     "      --version           Show version and exit\n"
     "\n"
     "Output columns (TSV): seq_id  pos_1based  context  strand  kmer  prob\n"
+    "With --window:        seq_id  start  end  n_acgt  gc  cpg_oe  CG_plus  CG_minus\n"
+    "                      CHG_plus  CHG_minus  CHH_plus  CHH_minus  p_CG  p_CHG  p_CHH\n"
     "\n"
     "Examples:\n"
     "  revelio -i genome.fa --heuristic > calls.tsv\n"
     "  zcat genome.fa.gz | revelio -i - --heuristic > calls.tsv\n"
-    "  revelio -i reads.fq --fastq --model weights.tsv -k 7 --header --out calls.tsv\n";
+    "  revelio -i reads.fq --fastq --model weights.tsv -k 7 --header --out calls.tsv\n"
+    "  revelio -i genome.fa --heuristic --window 10000 --header > profile.tsv\n";
+}
+
+// Parse a whole-string positive long; false on junk like "abc", "5x" or "0"
+inline bool parse_pos_long(const std::string& s, long& v) {
+    try {
+        std::size_t used = 0;
+        v = std::stol(s, &used);
+        return used == s.size() && v > 0;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 // Parse a whole-string integer; false on junk like "abc" or "5x"
@@ -312,6 +333,7 @@ inline int parse_cli(int argc, char* argv[], Options& opt) {
         const bool takes_value = (a == "-i" || a == "--in" || a == "--input" ||
                                   a == "-k" || a == "--kmer" || a == "--model" ||
                                   a == "--contexts" || a == "--strand" ||
+                                  a == "--window" || a == "--step" ||
                                   a == "-o" || a == "--out");
         if (takes_value && i+1 >= argc) { std::cerr << "Error: missing value for " << a << "\n"; return 1; }
 
@@ -340,6 +362,12 @@ inline int parse_cli(int argc, char* argv[], Options& opt) {
             opt.strand = argv[++i];
             if (opt.strand != "both" && opt.strand != "+" && opt.strand != "-") {
                 std::cerr << "Error: --strand must be both, + or -\n";
+                return 1;
+            }
+        } else if (a == "--window" || a == "--step") {
+            const std::string v = argv[++i];
+            if (!parse_pos_long(v, a == "--window" ? opt.window : opt.step)) {
+                std::cerr << "Error: " << a << " expects a positive integer, got '" << v << "'\n";
                 return 1;
             }
         } else if (a == "-o" || a == "--out") {
@@ -377,15 +405,14 @@ inline const char* context_at(const std::string& s, std::size_t i, char strand) 
     return nullptr;
 }
 
-// Scan one sequence and write hits
-inline void scan_sequence(const std::string& id,
-                          const std::string& seq,
-                          int k,
-                          const std::function<double(const std::string&, const std::string&)>& predictor,
+using Predictor = std::function<double(const std::string&, const std::string&)>;
+
+// Call f(i, ctx, strand, kmer, prob) for every reported site of seq.
+// Per-site output and window profiles share this, so their counts always agree.
+template <class F>
+inline void for_each_site(const std::string& seq, int k, const Predictor& predictor,
                           const std::unordered_set<std::string>& ctx_filter,
-                          bool scan_plus,
-                          bool scan_minus,
-                          std::ostream& out)
+                          bool scan_plus, bool scan_minus, F&& f)
 {
     for (std::size_t i = 0; i < seq.size(); ++i) {
         const char b = seq[i];
@@ -403,15 +430,109 @@ inline void scan_sequence(const std::string& id,
         if (km.empty()) continue;
         if (strand == '-') km = revcomp(km);   // read 5'->3' on the C's own strand
 
-        const double prob = predictor(ctx, km);
+        f(i, ctx, strand, km, predictor(ctx, km));
+    }
+}
 
-        // seq_id  pos_1based  context  strand  kmer  prob
-        out << id << '\t'
-            << (i + 1) << '\t'
-            << ctx << '\t'
-            << strand << '\t'
-            << km << '\t'
-            << std::fixed << std::setprecision(6) << prob << '\n';
+// Scan one sequence and write hits
+inline void scan_sequence(const std::string& id,
+                          const std::string& seq,
+                          int k,
+                          const Predictor& predictor,
+                          const std::unordered_set<std::string>& ctx_filter,
+                          bool scan_plus,
+                          bool scan_minus,
+                          std::ostream& out)
+{
+    for_each_site(seq, k, predictor, ctx_filter, scan_plus, scan_minus,
+        [&](std::size_t i, const char* ctx, char strand, const std::string& km, double prob) {
+            // seq_id  pos_1based  context  strand  kmer  prob
+            out << id << '\t'
+                << (i + 1) << '\t'
+                << ctx << '\t'
+                << strand << '\t'
+                << km << '\t'
+                << std::fixed << std::setprecision(6) << prob << '\n';
+        });
+}
+
+// Per-block tallies for --window; a window is the sum of window/step consecutive blocks
+struct Block {
+    long n_acgt = 0, n_c = 0, n_g = 0, n_cpg = 0;
+    long n[3][2] = {};      // [CG, CHG, CHH][+, -] site counts
+    double psum[3] = {};    // summed prior per context
+
+    void add(const Block& o) {
+        n_acgt += o.n_acgt; n_c += o.n_c; n_g += o.n_g; n_cpg += o.n_cpg;
+        for (int c = 0; c < 3; ++c) { n[c][0] += o.n[c][0]; n[c][1] += o.n[c][1]; psum[c] += o.psum[c]; }
+    }
+};
+
+inline int ctx_index(const char* ctx) {
+    return ctx[1] == 'G' ? 0 : (ctx[2] == 'G' ? 1 : 2);   // CG, CHG, CHH
+}
+
+inline void print_profile_header(std::ostream& out) {
+    out << "seq_id\tstart\tend\tn_acgt\tgc\tcpg_oe\tCG_plus\tCG_minus\tCHG_plus\tCHG_minus"
+           "\tCHH_plus\tCHH_minus\tp_CG\tp_CHG\tp_CHH\n";
+}
+
+// Profile one sequence in windows of `window` bp moving by `step` bp (BED coordinates)
+inline void profile_sequence(const std::string& id,
+                             const std::string& seq,
+                             int k,
+                             const Predictor& predictor,
+                             const std::unordered_set<std::string>& ctx_filter,
+                             bool scan_plus,
+                             bool scan_minus,
+                             long window,
+                             long step,
+                             std::ostream& out)
+{
+    const long len = static_cast<long>(seq.size());
+    if (len == 0) return;
+    std::vector<Block> blocks(static_cast<std::size_t>((len + step - 1) / step));
+
+    for (long i = 0; i < len; ++i) {
+        Block& bl = blocks[static_cast<std::size_t>(i / step)];
+        const char b = seq[static_cast<std::size_t>(i)];
+        if (b == 'N') continue;
+        ++bl.n_acgt;
+        if (b == 'C') { ++bl.n_c; if (i + 1 < len && seq[static_cast<std::size_t>(i + 1)] == 'G') ++bl.n_cpg; }
+        else if (b == 'G') ++bl.n_g;
+    }
+    for_each_site(seq, k, predictor, ctx_filter, scan_plus, scan_minus,
+        [&](std::size_t i, const char* ctx, char strand, const std::string&, double prob) {
+            Block& bl = blocks[i / static_cast<std::size_t>(step)];
+            const int c = ctx_index(ctx);
+            ++bl.n[c][strand == '+' ? 0 : 1];
+            bl.psum[c] += prob;
+        });
+
+    const std::size_t per_window = static_cast<std::size_t>(window / step);
+    for (std::size_t j = 0; j < blocks.size(); ++j) {
+        Block w;
+        for (std::size_t q = j; q < j + per_window && q < blocks.size(); ++q) w.add(blocks[q]);
+        const long start = static_cast<long>(j) * step;
+        const long end = std::min(start + window, len);
+
+        out << id << '\t' << start << '\t' << end << '\t' << w.n_acgt << '\t' << std::fixed << std::setprecision(4);
+        if (w.n_acgt > 0) out << static_cast<double>(w.n_c + w.n_g) / static_cast<double>(w.n_acgt);
+        else out << "NA";
+        out << '\t';
+        // CpG observed/expected (Gardiner-Garden & Frommer 1987)
+        if (w.n_c > 0 && w.n_g > 0)
+            out << static_cast<double>(w.n_cpg) * static_cast<double>(w.n_acgt) / (static_cast<double>(w.n_c) * static_cast<double>(w.n_g));
+        else out << "NA";
+        for (int c = 0; c < 3; ++c) out << '\t' << w.n[c][0] << '\t' << w.n[c][1];
+        out << std::setprecision(6);
+        for (int c = 0; c < 3; ++c) {
+            const long nc = w.n[c][0] + w.n[c][1];
+            out << '\t';
+            if (nc > 0) out << w.psum[c] / static_cast<double>(nc);
+            else out << "NA";
+        }
+        out << '\n';
     }
 }
 
@@ -431,6 +552,17 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: input file required. Use -i <file>\n";
         print_help(std::cerr);
         return 1;
+    }
+    if (opt.step > 0 && opt.window == 0) {
+        std::cerr << "Error: --step needs --window\n";
+        return 1;
+    }
+    if (opt.window > 0) {
+        if (opt.step == 0) opt.step = opt.window;
+        if (opt.step > opt.window || opt.window % opt.step != 0) {
+            std::cerr << "Error: --window must be a multiple of --step (and >= --step)\n";
+            return 1;
+        }
     }
     if (opt.heuristic && !opt.model_path.empty()) {
         std::cerr << "Error: --heuristic and --model are mutually exclusive\n";
@@ -472,7 +604,7 @@ int main(int argc, char* argv[]) {
 
     // Predictor (heuristic or model)
     Model mdl;
-    std::function<double(const std::string&, const std::string&)> predictor;
+    Predictor predictor;
 
     if (!opt.model_path.empty()) {
         std::string err;
@@ -509,14 +641,19 @@ int main(int argc, char* argv[]) {
     }
 
     if (opt.print_header) {
-        *out << "seq_id\tpos_1based\tcontext\tstrand\tkmer\tprob\n";
+        if (opt.window > 0) print_profile_header(*out);
+        else *out << "seq_id\tpos_1based\tcontext\tstrand\tkmer\tprob\n";
     }
 
     // Read and scan
     Reader rdr(in, ft);
     while (rdr.next()) {
-        scan_sequence(rdr.cur_id, rdr.cur_seq, opt.k, predictor, opt.ctx_filter,
-                      opt.strand != "-", opt.strand != "+", *out);
+        if (opt.window > 0)
+            profile_sequence(rdr.cur_id, rdr.cur_seq, opt.k, predictor, opt.ctx_filter,
+                             opt.strand != "-", opt.strand != "+", opt.window, opt.step, *out);
+        else
+            scan_sequence(rdr.cur_id, rdr.cur_seq, opt.k, predictor, opt.ctx_filter,
+                          opt.strand != "-", opt.strand != "+", *out);
     }
 
     out->flush();

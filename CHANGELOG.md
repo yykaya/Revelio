@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0 — 2026-11-04
+
+- **Window profiles**: `--window <bp>` (and `--step <bp>`) write one row per window with GC, CpG observed/expected, site counts per context and strand, and the mean prior per context. Counts equal the per-site rows of the same command.
+
 ## 0.2.0 — 2026-11-04
 
 - **Both strands** are scanned by default (`--strand both|+|-`). Minus-strand sites are reported at the + strand coordinate of their G, with context and k-mer read 5'→3' on the minus strand. `--strand +` reproduces the 0.1.x output.
