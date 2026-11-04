@@ -23,14 +23,15 @@
 
 
 
-**Status:** research prototype (v0.1.1) • **Developer:** Yasin Kaya, MPIPZ (ykaya@mpipz.mpg.de | yyasinkkaya@gmail.com) • **License:** MIT
+**Status:** research prototype (v0.2.0) • **Developer:** Yasin Kaya, MPIPZ (ykaya@mpipz.mpg.de | yyasinkkaya@gmail.com) • **License:** MIT
 
 ---
 
 ## Features
 
 - **Fast, portable, single binary.** Streams large genomes/reads in one pass.
-- **Context-aware priors.** Pick a quick **heuristic** or supply your own **logistic k-mer weights**.
+- **Both strands.** Reports cytosines on the + and − strand (`--strand both|+|-`).
+- **Context-aware priors.** Pick a quick **heuristic** or supply your own **logistic k-mer weights** with per-context intercepts.
 - **FASTA/FASTQ auto-detection.** Handles multi-line FASTA and 4-line FASTQ.
 - **Practical TSV output**: `seq_id, pos_1based, context, strand, kmer, prob`.
 - **Works from stdin.** Pipe compressed input via `zcat`/`pigz -dc` (`-i -` or `-i /dev/stdin`).
@@ -93,13 +94,31 @@ zcat genome.fa.gz | ./revelio -i - --heuristic > calls.tsv
 
 ---
 
+## Example
+
+[`examples/col0_chr1_3631-4630.fa`](examples/) is 1 kb of the *Arabidopsis thaliana* Col-0 reference (TAIR10 Chr1:3,631–4,630, the 5' end of AT1G01010 / NAC001). Run it with the starter weights:
+
+```bash
+./revelio -i examples/col0_chr1_3631-4630.fa --model weights.tsv --header \
+    -o examples/col0_chr1_3631-4630.model.tsv
+python3 docs/make_example_figure.py   # redraws docs/example_sites.png (needs matplotlib)
+```
+
+![Revelio example: cytosine contexts on both strands and per-site prior probabilities](docs/example_sites.png)
+
+**a.** A 36-bp stretch of the region. Revelio reads the top strand 5'→3' and the bottom strand 5'→3' as well (right to left here). Each highlighted base is a cytosine that Revelio reports, coloured by context. A CG is symmetric, so its C sits on both strands (positions 43/44 and 67/68). CHG and CHH sites are strand-specific. The CAG at 53 and the CTG at 55 are mirror images of each other.
+
+**b.** Every reported site in the 1-kb region. + strand sites point up and − strand sites point down, and the stem height is the prior probability. The bundled `weights.tsv` is illustrative, so most k-mers are not in the table and score the intercept of their context (`BIAS_CG` ≈ 0.73, `BIAS_CHG` ≈ 0.38, `BIAS_CHH` ≈ 0.18). The few k-mers that are in the table stand out above that level. The region has 402 sites, 223 of them on the − strand, all of which a forward-only scan would miss. Coordinates in `seq_id` = `Chr1:3631-4630` are relative to the region (position 1 = Chr1:3,631).
+
+---
+
 ## Usage
 ```text
-revelio 0.1.1 — lightweight methylation context predictor
+revelio 0.2.0 — lightweight methylation context predictor
 Usage:
   revelio -i <input.fa|fq|-> [--fasta|--fastq] [-k 5]
           [--heuristic | --model weights.tsv]
-          [--contexts CG,CHG,CHH] [--header] [--out output.tsv]
+          [--contexts CG,CHG,CHH] [--strand both] [--header] [--out output.tsv]
 
 Options:
   -i, --input <path>      Input FASTA/FASTQ; '-' or /dev/stdin reads stdin
@@ -109,6 +128,7 @@ Options:
       --heuristic         Use built-in heuristic priors (no weights table)
       --model <tsv>       Use logistic weights table
       --contexts <list>   Comma-separated subset (CG,CHG,CHH); default: all
+      --strand <s>        both | + | - (default: both)
       --header            Print header line in TSV output
   -o, --out <path>        Write to file (default: stdout)
   -h, --help              Show help and exit
@@ -119,29 +139,31 @@ Options:
 `seq_id  pos_1based  context  strand  kmer  prob`  
 `seq_id` is the header text up to the first whitespace. Invalid options or inputs exit with a non-zero status.
 
-Example:
+Example (from [`examples/`](examples/)):
 ```text
-Chr1    123     CG      +       ACGTA   0.903114
-Chr1    456     CHH     +       CATTG   0.377540
+Chr1:3631-4630  43      CG      +       ATCGG   0.731059
+Chr1:3631-4630  44      CG      -       TCCGA   0.731059
+Chr1:3631-4630  118     CG      -       ACCGT   0.937027
 ```
 
-> Note: Positions report the **C on the + strand**. Current version outputs `strand=+` (reverse-strand aggregation is on the roadmap).
+> Note: a minus-strand site is reported at the + strand coordinate of its **G** (the C on the reverse strand), and its `kmer` and context are read 5'→3' on the minus strand. A CG dinucleotide therefore gives two rows (C at `pos`, `+`; G at `pos+1`, `-`). Use `--strand +` for the v0.1 forward-only behaviour.
 
 ---
 
 ## Modes
 
 ### Heuristic mode (`--heuristic`)
-A lightweight prior that scores sites based on **context class** and simple **k-mer checks** (e.g., centered C, valid CG/CHG/CHH, optional flanking patterns). Intended for **fast ranking**, not calibrated probabilities.
+A fixed prior per **context class** that follows the usual plant ordering: CG 0.85, CHG 0.55, CHH 0.25. The k-mer is not used. Intended for **fast ranking**, not calibrated probabilities.
 
 ### Logistic weights mode (`--model weights.tsv`)
 Loads a user-provided **(context, k-mer) → weight** mapping and computes:
 ```
-p = sigmoid( BIAS + weight(context, kmer) )
+p = sigmoid( BIAS + BIAS_<context> + weight(context, kmer) )
 sigmoid(x) = 1 / (1 + e^(-x))
 ```
 - `-k` must be **odd** (e.g., 5, 7, 9) and the k-mer is centered on the cytosine.
-- If a `(context,kmer)` pair is **missing**, its score is `sigmoid(BIAS)` (0.5 when no `BIAS` row is given).
+- Missing terms count as 0: a `(context,kmer)` pair absent from the table scores `sigmoid(BIAS + BIAS_<context>)` (0.5 when neither row is given).
+- Minus-strand sites are looked up with their minus-strand k-mer, so one table serves both strands.
 - The table is validated on load: unknown contexts, non-ACGT k-mers, mixed k-mer lengths, or a k-mer length different from `-k` are errors.
 - `--heuristic` and `--model` are mutually exclusive; an unreadable `--model` is an error (no silent fallback).
 
@@ -153,18 +175,25 @@ A simple **TSV without header**:
 
 ```text
 # optional global bias row
-BIAS    0.0
+BIAS      0.0
+
+# optional per-context intercepts
+BIAS_CG   1.0
+BIAS_CHG  -0.5
+BIAS_CHH  -1.5
 
 # context  kmer       weight
-CG       ACGTA       2.25
-CHG      CAGTC       1.10
-CHH      CATTG       0.30
+CG       AACGT       2.25
+CHG      TTCAG       1.10
+CHH      TACCA       0.30
 ```
 
 Guidelines:
 - `context ∈ {CG, CHG, CHH}`
-- `kmer` length must equal `-k` and be uppercase DNA (A/C/G/T).
-- Use **`BIAS`** to shift all logits up/down (acts like an intercept).
+- `kmer` length must equal `-k`, be DNA (A/C/G/T), and have the cytosine in the middle.
+- Use **`BIAS`** to shift all logits up/down (a global intercept).
+- Use **`BIAS_CG` / `BIAS_CHG` / `BIAS_CHH`** to give each context its own intercept, so unlisted k-mers keep the expected CG > CHG > CHH ordering.
+- The bundled [`weights.tsv`](weights.tsv) holds **illustrative** values for k = 5, not weights trained on methylation data.
 
 ---
 
@@ -181,10 +210,10 @@ Guidelines:
 | Column       | Description                                        |
 |--------------|----------------------------------------------------|
 | `seq_id`     | FASTA/FASTQ record identifier                      |
-| `pos_1based` | 1-based coordinate of the **C** on the + strand    |
+| `pos_1based` | 1-based + strand coordinate of the cytosine (for `-` sites, the G on the + strand) |
 | `context`    | One of `CG`, `CHG`, `CHH`                          |
-| `strand`     | Currently `+` (forward)                            |
-| `kmer`       | Centered k-mer (odd `-k`, C is the center)         |
+| `strand`     | `+` or `-` (strand of the cytosine)                |
+| `kmer`       | Centered k-mer read 5'→3' on the C's strand (odd `-k`, C is the center) |
 | `prob`       | Heuristic/logistic probability in **[0,1]**        |
 
 ---
@@ -206,7 +235,7 @@ Guidelines:
 
 ## Roadmap
 
-- Reverse-strand aggregation and duplex-aware reporting
+- Duplex-aware reporting (merge the two C's of a CG into one row)
 - Optional BED/BEDMethyl output
 - Native gzip input
 - Pluggable k-mer featurizers (e.g., degeneracy, repeats)

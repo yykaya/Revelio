@@ -5,7 +5,7 @@
   License: MIT
 
   Features
-  - Detect CG / CHG / CHH contexts (H ∈ {A, C, T}) around cytosines (forward strand).
+  - Detect CG / CHG / CHH contexts (H ∈ {A, C, T}) around cytosines on both strands.
   - Extract a centered k-mer (odd k, default k=5).
   - Predict methylation probability via:
       (A) heuristic priors (CG > CHG > CHH), or
@@ -16,7 +16,8 @@
   - seq_id is the header up to the first whitespace.
 
   Notes / Limitations
-  - Forward strand only for simplicity (counts contexts as seen on + strand).
+  - Minus-strand sites are reported at the + strand coordinate of their G, with the k-mer
+    and context read 5'->3' on the minus strand.
   - Ambiguity (non-ACGT) breaks context; such windows are skipped.
   - This is a fast *sequence-context prior*. It does NOT analyze raw signal.
     For signal-level methylation (e.g., ONT), see deep learning tools such as DeepSignal-plant.
@@ -37,7 +38,7 @@
 
 namespace rv {
 
-static constexpr const char* kVersion = "0.1.1";
+static constexpr const char* kVersion = "0.2.0";
 
 // ---------- small helpers ----------
 inline char up(char c) { return static_cast<char>(std::toupper(static_cast<unsigned char>(c))); }
@@ -63,7 +64,7 @@ inline std::string trim(const std::string& s) {
     return s.substr(a, b - a + 1);
 }
 
-// (Prepared for future both-strands mode)
+// Reverse complement (minus-strand k-mers)
 inline char comp(char b) {
     b = up(b);
     switch (b) { case 'A': return 'T'; case 'T': return 'A'; case 'C': return 'G'; case 'G': return 'C'; default: return 'N'; }
@@ -79,11 +80,13 @@ inline std::string revcomp(const std::string& s) {
 //   context  kmer  weight
 // e.g.
 //   BIAS   -0.20      # optional global bias
+//   BIAS_CG  1.00     # optional per-context intercepts (BIAS_CG / BIAS_CHG / BIAS_CHH)
 //   CG     ACGTA  2.10
 //   CHG    CCGTC  0.80
 //   CHH    CATTG -0.40
 struct Model {
     double bias = 0.0;
+    std::unordered_map<std::string, double> ctx_bias; // CG/CHG/CHH -> intercept
     int kmer_len = 0;                          // set from the first k-mer row
     std::unordered_map<std::string, double> w; // key = context + '\t' + kmer
 
@@ -99,12 +102,20 @@ struct Model {
             if (line.empty() || line[0] == '#') continue;
             const std::string where = path + ":" + std::to_string(lineno) + ": ";
 
-            // BIAS <number>
+            // BIAS <number>  or  BIAS_<context> <number>
             if (line.rfind("BIAS", 0) == 0) {
                 std::istringstream iss(line);
                 std::string tag; double wt;
-                if (!(iss >> tag >> wt)) { err = where + "BIAS needs a number"; return false; }
-                bias = wt;
+                if (!(iss >> tag >> wt)) { err = where + tag + " needs a number"; return false; }
+                for (char& c : tag) c = up(c);
+                if (tag == "BIAS") {
+                    bias = wt;
+                } else if (tag == "BIAS_CG" || tag == "BIAS_CHG" || tag == "BIAS_CHH") {
+                    ctx_bias[tag.substr(5)] = wt;
+                } else {
+                    err = where + "unknown bias row '" + tag + "' (use BIAS, BIAS_CG, BIAS_CHG or BIAS_CHH)";
+                    return false;
+                }
                 continue;
             }
 
@@ -129,9 +140,12 @@ struct Model {
         return true;
     }
 
+    // p = sigmoid(BIAS + BIAS_<ctx> + w[ctx,kmer]); missing terms count as 0
     double score(const std::string& ctx, const std::string& kmer) const {
-        const auto it = w.find(ctx + "\t" + kmer);
         double s = bias;
+        const auto cb = ctx_bias.find(ctx);
+        if (cb != ctx_bias.end()) s += cb->second;
+        const auto it = w.find(ctx + "\t" + kmer);
         if (it != w.end()) s += it->second;
         return sigmoid(s);
     }
@@ -228,6 +242,7 @@ struct Options {
     bool heuristic = false;
     bool print_header = false;
     int  k = 5;
+    std::string strand = "both";    // "both"|"+"|"-"
     std::unordered_set<std::string> ctx_filter; // empty = accept all
 };
 
@@ -255,7 +270,7 @@ inline void print_help(std::ostream& os) {
     "Usage:\n"
     "  revelio -i <input.fa|fq|-> [--fasta|--fastq] [-k 5]\n"
     "          [--heuristic | --model weights.tsv]\n"
-    "          [--contexts CG,CHG,CHH] [--header] [--out output.tsv]\n"
+    "          [--contexts CG,CHG,CHH] [--strand both] [--header] [--out output.tsv]\n"
     "\n"
     "Options:\n"
     "  -i, --input <path>      Input FASTA/FASTQ; '-' or /dev/stdin reads stdin\n"
@@ -265,6 +280,7 @@ inline void print_help(std::ostream& os) {
     "      --heuristic         Use built-in heuristic priors (no weights table)\n"
     "      --model <tsv>       Use logistic weights table\n"
     "      --contexts <list>   Comma-separated subset (CG,CHG,CHH); default: all\n"
+    "      --strand <s>        both | + | - (default: both)\n"
     "      --header            Print header line in TSV output\n"
     "  -o, --out <path>        Write to file (default: stdout)\n"
     "  -h, --help              Show help and exit\n"
@@ -295,7 +311,8 @@ inline int parse_cli(int argc, char* argv[], Options& opt) {
         std::string a = argv[i];
         const bool takes_value = (a == "-i" || a == "--in" || a == "--input" ||
                                   a == "-k" || a == "--kmer" || a == "--model" ||
-                                  a == "--contexts" || a == "-o" || a == "--out");
+                                  a == "--contexts" || a == "--strand" ||
+                                  a == "-o" || a == "--out");
         if (takes_value && i+1 >= argc) { std::cerr << "Error: missing value for " << a << "\n"; return 1; }
 
         if (a == "-i" || a == "--in" || a == "--input") {
@@ -319,6 +336,12 @@ inline int parse_cli(int argc, char* argv[], Options& opt) {
                 std::cerr << "Error: --contexts must list CG, CHG and/or CHH\n";
                 return 1;
             }
+        } else if (a == "--strand") {
+            opt.strand = argv[++i];
+            if (opt.strand != "both" && opt.strand != "+" && opt.strand != "-") {
+                std::cerr << "Error: --strand must be both, + or -\n";
+                return 1;
+            }
         } else if (a == "-o" || a == "--out") {
             opt.outfile = argv[++i];
         } else if (a == "-h" || a == "--help") {
@@ -335,33 +358,50 @@ inline int parse_cli(int argc, char* argv[], Options& opt) {
     return -1;
 }
 
+// Context (CG/CHG/CHH) of the cytosine at position i on the given strand, or nullptr.
+// '+': s[i]=='C', downstream bases are s[i+1], s[i+2].
+// '-': s[i]=='G' (a C on the reverse strand); its downstream bases are comp(s[i-1]), comp(s[i-2]).
+inline const char* context_at(const std::string& s, std::size_t i, char strand) {
+    char n1 = 'N', n2 = 'N';
+    if (strand == '+') {
+        if (i + 1 < s.size()) n1 = s[i + 1];
+        if (i + 2 < s.size()) n2 = s[i + 2];
+    } else {
+        if (i >= 1) n1 = comp(s[i - 1]);
+        if (i >= 2) n2 = comp(s[i - 2]);
+    }
+    if (n1 == 'G') return "CG";
+    if (!is_H(n1)) return nullptr;
+    if (n2 == 'G') return "CHG";
+    if (is_H(n2))  return "CHH";
+    return nullptr;
+}
+
 // Scan one sequence and write hits
 inline void scan_sequence(const std::string& id,
                           const std::string& seq,
                           int k,
                           const std::function<double(const std::string&, const std::string&)>& predictor,
                           const std::unordered_set<std::string>& ctx_filter,
+                          bool scan_plus,
+                          bool scan_minus,
                           std::ostream& out)
 {
     for (std::size_t i = 0; i < seq.size(); ++i) {
         const char b = seq[i];
-        if (b != 'C') continue;
+        char strand;
+        if (b == 'C' && scan_plus)       strand = '+';
+        else if (b == 'G' && scan_minus) strand = '-';   // C on the reverse strand
+        else continue;
 
-        std::string ctx;
-        if (i + 1 < seq.size() && seq[i + 1] == 'G') {
-            ctx = "CG";
-        } else if (i + 2 < seq.size() && is_H(seq[i + 1]) && seq[i + 2] == 'G') {
-            ctx = "CHG";
-        } else if (i + 2 < seq.size() && is_H(seq[i + 1]) && is_H(seq[i + 2])) {
-            ctx = "CHH";
-        } else {
-            continue;
-        }
+        const char* ctx = context_at(seq, i, strand);
+        if (!ctx) continue;
 
         if (!ctx_filter.empty() && !ctx_filter.count(ctx)) continue;
 
-        const std::string km = centered_kmer(seq, i, k);
+        std::string km = centered_kmer(seq, i, k);
         if (km.empty()) continue;
+        if (strand == '-') km = revcomp(km);   // read 5'->3' on the C's own strand
 
         const double prob = predictor(ctx, km);
 
@@ -369,7 +409,7 @@ inline void scan_sequence(const std::string& id,
         out << id << '\t'
             << (i + 1) << '\t'
             << ctx << '\t'
-            << '+' << '\t'
+            << strand << '\t'
             << km << '\t'
             << std::fixed << std::setprecision(6) << prob << '\n';
     }
@@ -445,8 +485,8 @@ int main(int argc, char* argv[]) {
                       << " but -k is " << opt.k << "; every site would get only BIAS\n";
             return 1;
         }
-        if (mdl.w.empty()) {
-            std::cerr << "Warning: model has no k-mer rows; every site scores sigmoid(BIAS)\n";
+        if (mdl.w.empty() && mdl.ctx_bias.empty()) {
+            std::cerr << "Warning: model has no k-mer or BIAS_<context> rows; every site scores sigmoid(BIAS)\n";
         }
         predictor = [&](const std::string& ctx, const std::string& km){ return mdl.score(ctx, km); };
     }
@@ -475,7 +515,8 @@ int main(int argc, char* argv[]) {
     // Read and scan
     Reader rdr(in, ft);
     while (rdr.next()) {
-        scan_sequence(rdr.cur_id, rdr.cur_seq, opt.k, predictor, opt.ctx_filter, *out);
+        scan_sequence(rdr.cur_id, rdr.cur_seq, opt.k, predictor, opt.ctx_filter,
+                      opt.strand != "-", opt.strand != "+", *out);
     }
 
     out->flush();
