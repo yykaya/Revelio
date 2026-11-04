@@ -1,11 +1,20 @@
 # weights.tsv — starter logistic weights (k=5)
+# ILLUSTRATIVE values to show the format; they are NOT trained on methylation data.
 # Format (TSV, no header):
 #   BIAS   <float>              # optional global bias (logit intercept)
+#   BIAS_<context> <float>      # optional per-context intercept (BIAS_CG / BIAS_CHG / BIAS_CHH)
 #   <context>  <kmer>  <weight> # context in {CG,CHG,CHH}; kmer length must equal -k and be centered on 'C'
 #
-# Probability is computed as: p = 1 / (1 + exp(-(BIAS + weight(context,kmer))))
+# Probability is computed as: p = 1 / (1 + exp(-(BIAS + BIAS_<context> + weight(context,kmer))))
+# Missing terms count as 0, so a k-mer absent from the table scores sigmoid(BIAS + BIAS_<context>).
+# Minus-strand k-mers are matched as read 5'->3' on the minus strand (reverse complement).
 
 BIAS	0.0
+
+# --- per-context intercepts: keep the plant ordering CG > CHG > CHH for unlisted k-mers
+BIAS_CG	1.0
+BIAS_CHG	-0.5
+BIAS_CHH	-1.5
 
 # --- CG examples (5-mer, center=C, +1=G): ??CG?
 CG	TTCGA	2.20
