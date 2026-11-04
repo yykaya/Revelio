@@ -23,7 +23,7 @@
 
 
 
-**Status:** research prototype (v0.1.0) • **Developer:** Yasin Kaya, MPIPZ (ykaya@mpipz.mpg.de | yyasinkkaya@gmail.com) • **License:** MIT
+**Status:** research prototype (v0.1.1) • **Developer:** Yasin Kaya, MPIPZ (ykaya@mpipz.mpg.de | yyasinkkaya@gmail.com) • **License:** MIT
 
 ---
 
@@ -33,7 +33,7 @@
 - **Context-aware priors.** Pick a quick **heuristic** or supply your own **logistic k-mer weights**.
 - **FASTA/FASTQ auto-detection.** Handles multi-line FASTA and 4-line FASTQ.
 - **Practical TSV output**: `seq_id, pos_1based, context, strand, kmer, prob`.
-- **Works from stdin.** Pipe compressed input via `zcat`/`pigz -dc`.
+- **Works from stdin.** Pipe compressed input via `zcat`/`pigz -dc` (`-i -` or `-i /dev/stdin`).
 
 ---
 
@@ -88,34 +88,36 @@ Filter by context (only CG and CHG):
 
 Stream a gzipped FASTA:
 ```bash
-zcat genome.fa.gz | ./revelio -i /dev/stdin --heuristic > calls.tsv
+zcat genome.fa.gz | ./revelio -i - --heuristic > calls.tsv
 ```
 
 ---
 
 ## Usage
 ```text
-revelio 0.1.0 — lightweight methylation-context predictor
+revelio 0.1.1 — lightweight methylation context predictor
 Usage:
-  revelio -i <input.fa|fq|/dev/stdin> [--fasta|--fastq] [-k 5]
+  revelio -i <input.fa|fq|-> [--fasta|--fastq] [-k 5]
           [--heuristic | --model weights.tsv]
           [--contexts CG,CHG,CHH] [--header] [--out output.tsv]
 
 Options:
-  -i, --input <path>      Input FASTA/FASTQ or /dev/stdin
+  -i, --input <path>      Input FASTA/FASTQ; '-' or /dev/stdin reads stdin
       --fasta             Force FASTA (auto-detected by default)
       --fastq             Force FASTQ
-  -k, --kmer <odd>        Centered k-mer size (default: 5; must be odd)
+  -k, --kmer <odd>        Centered k-mer size (default: 5; odd, >= 3)
       --heuristic         Use built-in heuristic priors (no weights table)
-      --model <tsv>       Use logistic weights table (see below)
+      --model <tsv>       Use logistic weights table
       --contexts <list>   Comma-separated subset (CG,CHG,CHH); default: all
       --header            Print header line in TSV output
-      --out <path>        Write to file (default: stdout)
+  -o, --out <path>        Write to file (default: stdout)
   -h, --help              Show help and exit
+      --version           Show version and exit
 ```
 
 **Output columns (TSV)**  
-`seq_id  pos_1based  context  strand  kmer  prob`
+`seq_id  pos_1based  context  strand  kmer  prob`  
+`seq_id` is the header text up to the first whitespace. Invalid options or inputs exit with a non-zero status.
 
 Example:
 ```text
@@ -139,7 +141,9 @@ p = sigmoid( BIAS + weight(context, kmer) )
 sigmoid(x) = 1 / (1 + e^(-x))
 ```
 - `-k` must be **odd** (e.g., 5, 7, 9) and the k-mer is centered on the cytosine.
-- If a `(context,kmer)` pair is **missing**, Revelio falls back to `BIAS` (if provided) or a neutral default.
+- If a `(context,kmer)` pair is **missing**, its score is `sigmoid(BIAS)` (0.5 when no `BIAS` row is given).
+- The table is validated on load: unknown contexts, non-ACGT k-mers, mixed k-mer lengths, or a k-mer length different from `-k` are errors.
+- `--heuristic` and `--model` are mutually exclusive; an unreadable `--model` is an error (no silent fallback).
 
 ---
 
@@ -166,7 +170,7 @@ Guidelines:
 
 ## Input Notes
 
-- **FASTA**: multi-line sequences supported.
+- **FASTA**: multi-line sequences supported; Windows (CRLF) line endings are handled.
 - **FASTQ**: 4-line records, qualities ignored (sequence only).
 - **Compression**: not handled internally—use shell pipes (`zcat | revelio -i /dev/stdin`).
 
@@ -189,7 +193,7 @@ Guidelines:
 
 - Compile with `-O3 -march=native` on a recent compiler.
 - Prefer smaller odd `-k` (5 or 7) for speed; larger `k` can improve specificity but increases table size and cache pressure.
-- Stream from disk or stdin; Revelio is **streaming** and uses bounded memory.
+- Stream from disk or stdin. Records are processed one at a time, so peak memory is about the size of the largest sequence (e.g. one chromosome).
 
 ---
 

@@ -28,7 +28,7 @@ debug: LDFLAGS := -fsanitize=address,undefined
 debug: $(BIN)
 
 test: $(BIN)
-	./$(BIN) --help || true
+	bash tests/run_tests.sh ./$(BIN)
 
 install: $(BIN)
 	install -d $(DESTDIR)$(PREFIX)/bin
@@ -48,7 +48,7 @@ help:
 	@echo "Targets:"
 	@echo "  release (default) - build with -O3"
 	@echo "  debug              - build with sanitizers"
-	@echo "  test               - run a lightweight self-check"
+	@echo "  test               - run regression tests (tests/run_tests.sh)"
 	@echo "  install            - install to \`$$(PREFIX)/bin\` (default PREFIX=$(PREFIX))"
 	@echo "  uninstall          - remove the installed binary"
 	@echo "  format             - clang-format the source (if available)"
