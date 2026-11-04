@@ -120,6 +120,22 @@ done
 "$BIN" -i "$EX" --heuristic --window 50 | awk -F'\t' '{n[$2]=$7+$8+$9+$10+$11+$12} END{for(s in n) print s, n[s]}' > "$TMP/w50"
 if awk 'NR==FNR{h[$1]=$2; next} {if(h[$1]+h[$1+50]!=$2) bad++} END{exit bad>0}' "$TMP/w50" "$TMP/w100"; then ok "--step windows = sum of blocks"; else bad "--step windows = sum of blocks"; fi
 
+# ---- revelio call: synthetic reads with known truth (tests/make_call_fixture.py) ----
+DATA=$(dirname "$0")/data
+gzip -dc "$DATA/call_reads.sam.gz" > "$TMP/reads.sam"
+expect_out "call: placement = ground truth"   "$DATA/call_expected.tsv" sh -c "gzip -dc '$DATA/call_reads.sam.gz' | '$BIN' call -r '$DATA/call_ref.fa' --header | cut -f1-8"
+"$BIN" call -r "$DATA/call_ref.fa" -i "$TMP/reads.sam" --stats "$TMP/cstats.tsv" > /dev/null
+if grep -qx "reads_clipped	2" "$TMP/cstats.tsv" && grep -qx "calls_unplaced	0" "$TMP/cstats.tsv"; then ok "call: clipped/MN records skipped, all calls placed"; else bad "call: stats"; cat "$TMP/cstats.tsv"; fi
+"$BIN" call -r "$DATA/call_ref.fa" -i "$TMP/reads.sam" --no-combine > "$TMP/split.tsv"
+"$BIN" call -r "$DATA/call_ref.fa" -i "$TMP/reads.sam" > "$TMP/comb.tsv"
+if [ "$(awk -F'\t' '$3=="CG"{t+=$6} END{print t}' "$TMP/split.tsv")" = "$(awk -F'\t' '$3=="CG"{t+=$6} END{print t}' "$TMP/comb.tsv")" ] \
+   && ! awk -F'\t' '$4=="."' "$TMP/split.tsv" | grep -q .; then ok "call: --no-combine keeps CpG strands apart"; else bad "call: --no-combine"; fi
+if awk -F'\t' '$6<20{bad=1} END{exit bad}' <("$BIN" call -r "$DATA/call_ref.fa" -i "$TMP/reads.sam" --min-cov 20); then ok "call: --min-cov filters"; else bad "call: --min-cov"; fi
+expect_rc "call: missing -r exits 1"        1 "$BIN" call -i "$TMP/reads.sam"
+expect_rc "call: even -k exits 1"           1 "$BIN" call -r "$DATA/call_ref.fa" -k 20 -i "$TMP/reads.sam"
+expect_rc "call: non-SAM input exits 2"     2 "$BIN" call -r "$DATA/call_ref.fa" -i "$TMP/t.fa"
+expect_rc "call: --help exits 0"            0 "$BIN" call --help
+
 expect_out "--kmer/--input/-o aliases"        "$TMP/exp_heur_nohdr.tsv" sh -c "'$BIN' --input '$TMP/t.fa' --kmer 5 --heuristic -o '$TMP/o.tsv' && cat '$TMP/o.tsv'"
 
 # ---- exit codes ----

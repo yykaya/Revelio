@@ -29,6 +29,9 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <map>
+#include <climits>
+#include <cstdlib>
 #include <vector>
 #include <algorithm>
 #include <cctype>
@@ -42,7 +45,7 @@
 
 namespace rv {
 
-static constexpr const char* kVersion = "0.3.0";
+static constexpr const char* kVersion = "0.4.0";
 
 // ---------- small helpers ----------
 inline char up(char c) { return static_cast<char>(std::toupper(static_cast<unsigned char>(c))); }
@@ -322,6 +325,9 @@ inline void print_help(std::ostream& os) {
     "With --window:        seq_id  start  end  n_acgt  gc  cpg_oe  CG_plus  CG_minus\n"
     "                      CHG_plus  CHG_minus  CHH_plus  CHH_minus  p_CG  p_CHG  p_CHH\n"
     "\n"
+    "Subcommands:\n"
+    "  revelio call ...        Alignment-free 5mC calls from MM/ML-tagged reads (see revelio call --help)\n"
+    "\n"
     "Examples:\n"
     "  revelio -i genome.fa --heuristic > calls.tsv\n"
     "  zcat genome.fa.gz | revelio -i - --heuristic > calls.tsv\n"
@@ -569,12 +575,449 @@ inline void profile_sequence(const std::string& id,
     }
 }
 
+// ---------- revelio call: alignment-free placement of MM/ML 5mC calls ----------
+//
+// Each read's 5mC calls (SAM MM/ML tags, C+m) are placed on a reference with k-mers
+// only; POS/CIGAR are never read, so unaligned BAMs (via samtools view) work too.
+//   1. index : k-mers of every reference record, both strands; unique ones are anchors
+//   2. chain : a read's anchors are chained collinearly (segments of equal diagonal
+//              joined by DP; one chain per orientation, so inversions vs the reference
+//              give two chains); small off-chain segments, e.g. a paralogue-specific
+//              k-mer after gene conversion, are dropped
+//   3. place : each call goes to the nearest chain anchor's prediction (snapped to the
+//              matching base within +-3 bp); "direct" when the site-centred k-mer is
+//              unique and agrees with the chain
+//   4. pool  : per site; CpGs combine both strands (strand '.'), CHG/CHH stay stranded
+namespace call {
+
+struct Hit { std::uint32_t rec; std::int64_t pos; char strand; };  // pos = + start of the k-mer
+
+inline int base2(char b) {
+    switch (b) { case 'A': return 0; case 'C': return 1; case 'G': return 2; case 'T': return 3; default: return -1; }
+}
+
+struct Index {
+    static constexpr std::uint32_t kMulti = 0xffffffffu;
+    int k = 21;
+    std::unordered_map<std::uint64_t, std::uint32_t> map;   // k-mer code -> hits index | kMulti
+    std::vector<Hit> hits;
+
+    void insert(std::uint64_t code, const Hit& h) {
+        auto it = map.find(code);
+        if (it == map.end()) { map.emplace(code, static_cast<std::uint32_t>(hits.size())); hits.push_back(h); }
+        else it->second = kMulti;
+    }
+    const Hit* unique(std::uint64_t code) const {
+        auto it = map.find(code);
+        return (it == map.end() || it->second == kMulti) ? nullptr : &hits[it->second];
+    }
+};
+
+// Calls f(start, fwd_code, rc_code) for every ACGT-only k-mer of s (odd k <= 31)
+template <class F>
+inline void for_each_kmer(const std::string& s, int k, F&& f) {
+    const std::uint64_t mask = (k == 32) ? ~0ull : ((1ull << (2 * k)) - 1);
+    std::uint64_t fwd = 0, rc = 0;
+    int valid = 0;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        const int b = base2(s[i]);
+        if (b < 0) { valid = 0; fwd = rc = 0; continue; }
+        fwd = ((fwd << 2) | static_cast<std::uint64_t>(b)) & mask;
+        rc = (rc >> 2) | (static_cast<std::uint64_t>(3 - b) << (2 * (k - 1)));
+        if (++valid >= k) f(static_cast<std::int64_t>(i) + 1 - k, fwd, rc);
+    }
+}
+
+inline Index build_index(const std::vector<std::string>& seqs, int k) {
+    Index idx; idx.k = k;
+    for (std::uint32_t r = 0; r < seqs.size(); ++r) {
+        for_each_kmer(seqs[r], k, [&](std::int64_t s, std::uint64_t fwd, std::uint64_t rc) {
+            idx.insert(fwd, Hit{r, s, '+'});
+            idx.insert(rc, Hit{r, s, '-'});    // odd k: a k-mer is never its own revcomp
+        });
+    }
+    return idx;
+}
+
+struct Anchor { std::int64_t i; Hit h; };                    // i = read start of the k-mer
+
+inline std::int64_t plus_coord(const Anchor& a, std::int64_t p, int k) {
+    return a.h.strand == '+' ? a.h.pos + (p - a.i) : a.h.pos + k - 1 - (p - a.i);
+}
+inline std::int64_t diagonal(const Anchor& a, int k) {
+    return a.h.strand == '+' ? a.h.pos - a.i : a.h.pos + k - 1 + a.i;
+}
+
+struct Segment { std::uint32_t rec; char strand; std::int64_t d_first, d_last, start, end; std::vector<Anchor> anchors; };
+struct Chain { std::int64_t start, end; std::vector<Anchor> anchors; std::vector<std::int64_t> pos; };
+
+inline std::vector<Chain> collinear_chains(const std::vector<Anchor>& anchors, int k, std::int64_t tol, std::size_t min_anchors) {
+    std::vector<Segment> segs;
+    for (const Anchor& a : anchors) {
+        const std::int64_t d = diagonal(a, k);
+        if (!segs.empty()) {
+            Segment& sg = segs.back();
+            if (sg.rec == a.h.rec && sg.strand == a.h.strand && std::llabs(d - sg.d_last) <= tol && a.i - sg.end <= 200) {
+                sg.anchors.push_back(a); sg.end = a.i; sg.d_last = d;
+                continue;
+            }
+        }
+        segs.push_back(Segment{a.h.rec, a.h.strand, d, d, a.i, a.i, {a}});
+    }
+    std::vector<Chain> chains;
+    std::vector<bool> used(segs.size(), false);
+    std::vector<std::size_t> score(segs.size());
+    std::vector<long> prev(segs.size());
+    while (true) {
+        long best = -1;
+        for (std::size_t j = 0; j < segs.size(); ++j) {
+            score[j] = 0; prev[j] = -1;
+            if (used[j]) continue;
+            const Segment& sj = segs[j];
+            score[j] = sj.anchors.size();
+            for (std::size_t i = (j > 200 ? j - 200 : 0); i < j; ++i) {
+                const Segment& si = segs[i];
+                if (used[i] || si.rec != sj.rec || si.strand != sj.strand || si.end >= sj.start) continue;
+                const double allowed = static_cast<double>(tol) + 0.05 * static_cast<double>(sj.start - si.end);
+                if (static_cast<double>(std::llabs(sj.d_first - si.d_last)) <= allowed &&
+                    score[i] + sj.anchors.size() > score[j]) {
+                    score[j] = score[i] + sj.anchors.size();
+                    prev[j] = static_cast<long>(i);
+                }
+            }
+            if (best < 0 || score[j] > score[static_cast<std::size_t>(best)]) best = static_cast<long>(j);
+        }
+        if (best < 0 || score[static_cast<std::size_t>(best)] < min_anchors) break;
+        std::vector<std::size_t> members;
+        for (long j = best; j >= 0; j = prev[static_cast<std::size_t>(j)]) members.push_back(static_cast<std::size_t>(j));
+        std::reverse(members.begin(), members.end());
+        Chain ch;
+        ch.start = segs[members.front()].start;
+        ch.end = segs[members.back()].end;
+        for (std::size_t m : members) {
+            used[m] = true;                           // chains may overlap in read span
+            for (const Anchor& a : segs[m].anchors) { ch.anchors.push_back(a); ch.pos.push_back(a.i); }
+        }
+        chains.push_back(std::move(ch));
+    }
+    return chains;
+}
+
+struct ModCall { std::int64_t p; double prob; };
+
+// 5mC calls (C+m, alone or in a combined code such as C+hm) in original read orientation.
+// Returns false if MM/ML are inconsistent with the sequence.
+inline bool parse_mm_ml(const std::string& seq, const std::string& mm, const std::vector<int>& ml,
+                        std::vector<ModCall>& out) {
+    out.clear();
+    std::vector<std::int64_t> c_pos;
+    for (std::size_t i = 0; i < seq.size(); ++i) if (seq[i] == 'C') c_pos.push_back(static_cast<std::int64_t>(i));
+    std::size_t ml_i = 0;
+    std::istringstream entries(mm);
+    std::string entry;
+    while (std::getline(entries, entry, ';')) {
+        if (entry.empty()) continue;
+        std::istringstream parts(entry);
+        std::string head, tok;
+        std::getline(parts, head, ',');
+        std::vector<std::int64_t> skips;
+        while (std::getline(parts, tok, ',')) {
+            try { skips.push_back(std::stoll(tok)); } catch (const std::exception&) { return false; }
+        }
+        // head = <base><strand><codes>[.?]; codes are letters or one ChEBI number
+        if (head.size() < 3) return false;
+        std::string codes = head.substr(2);
+        if (!codes.empty() && (codes.back() == '.' || codes.back() == '?')) codes.pop_back();
+        const bool numeric = !codes.empty() && std::isdigit(static_cast<unsigned char>(codes[0]));
+        const std::size_t n_codes = numeric ? 1 : codes.size();
+        const std::size_t m_at = numeric ? std::string::npos : codes.find('m');
+        if (head[0] == 'C' && head[1] == '+' && m_at != std::string::npos) {
+            std::int64_t j = -1;
+            for (std::size_t n = 0; n < skips.size(); ++n) {
+                j += skips[n] + 1;
+                if (j < 0 || j >= static_cast<std::int64_t>(c_pos.size())) return false;
+                const std::size_t at = ml_i + n * n_codes + m_at;
+                if (at >= ml.size()) return false;
+                out.push_back(ModCall{c_pos[static_cast<std::size_t>(j)], (ml[at] + 0.5) / 256.0});
+            }
+        }
+        ml_i += skips.size() * n_codes;
+    }
+    return ml_i == ml.size();
+}
+
+struct Options {
+    std::string ref, infile = "-", outfile, stats;
+    int k = 21;
+    std::int64_t tol = 15, max_dist = 1000, min_cov = 1;
+    std::size_t min_chain = 50;
+    bool combine = true, header = false;
+};
+
+inline void print_help(std::ostream& os) {
+    os <<
+    "revelio call " << kVersion << " — alignment-free 5mC calls from MM/ML-tagged reads\n"
+    "Usage:\n"
+    "  samtools view reads.bam | revelio call -r region.fa [options] > calls.tsv\n"
+    "\n"
+    "Options:\n"
+    "  -r, --ref <fa>          Reference sequence(s): a locus, a haplotype or a small genome\n"
+    "  -i, --input <sam|->     SAM text with MM/ML tags (default: stdin); unaligned reads are fine\n"
+    "  -k <odd>                Anchor k-mer size, 11-31 (default: 21)\n"
+    "      --min-chain <n>     Min unique anchors per read chain (default: 50)\n"
+    "      --tol <bp>          Diagonal drift allowed within a chain (default: 15)\n"
+    "      --max-dist <bp>     Max read distance from a call to its chain anchor (default: 1000)\n"
+    "      --min-cov <n>       Min calls per reported site (default: 1)\n"
+    "      --no-combine        Keep CpG strands separate (default: pool both strands)\n"
+    "      --header            Print header line\n"
+    "  -o, --out <path>        Output file (default: stdout)\n"
+    "      --stats <path>      Write read/call placement counts (TSV)\n"
+    "\n"
+    "Output: seq_id  pos_1based  context  strand  mod  tot  pct  mean_prob  n_direct  n_chained\n"
+    "  CpG rows are reported at the + strand C with strand '.', when strands are pooled.\n";
+}
+
+inline int parse_cli(int argc, char* argv[], Options& o) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        const bool takes_value = (a == "-r" || a == "--ref" || a == "-i" || a == "--input" || a == "-k" ||
+                                  a == "--min-chain" || a == "--tol" || a == "--max-dist" || a == "--min-cov" ||
+                                  a == "-o" || a == "--out" || a == "--stats");
+        if (takes_value && i + 1 >= argc) { std::cerr << "Error: missing value for " << a << "\n"; return 1; }
+        std::int64_t v = 0;
+        auto num = [&](std::int64_t& dst) {
+            const std::string s = argv[++i];
+            if (!parse_pos_i64(s, v)) { std::cerr << "Error: " << a << " expects a positive integer, got '" << s << "'\n"; return false; }
+            dst = v; return true;
+        };
+        if (a == "-r" || a == "--ref") o.ref = argv[++i];
+        else if (a == "-i" || a == "--input") o.infile = argv[++i];
+        else if (a == "-o" || a == "--out") o.outfile = argv[++i];
+        else if (a == "--stats") o.stats = argv[++i];
+        else if (a == "-k") { std::int64_t kk; if (!num(kk)) return 1; o.k = static_cast<int>(kk); }
+        else if (a == "--min-chain") { std::int64_t m; if (!num(m)) return 1; o.min_chain = static_cast<std::size_t>(m); }
+        else if (a == "--tol") { if (!num(o.tol)) return 1; }
+        else if (a == "--max-dist") { if (!num(o.max_dist)) return 1; }
+        else if (a == "--min-cov") { if (!num(o.min_cov)) return 1; }
+        else if (a == "--no-combine") o.combine = false;
+        else if (a == "--header") o.header = true;
+        else if (a == "-h" || a == "--help") { print_help(std::cout); return 0; }
+        else { std::cerr << "Error: unknown option for call: " << a << " (see revelio call --help)\n"; return 1; }
+    }
+    if (o.ref.empty()) { std::cerr << "Error: -r/--ref is required\n"; return 1; }
+    if (o.k < 11 || o.k > 31 || o.k % 2 == 0) { std::cerr << "Error: -k must be odd and 11-31\n"; return 1; }
+    return -1;
+}
+
+// Placement counters (written by --stats); plain fields keep them off the hot path
+struct Stats {
+    std::int64_t reads = 0, reads_no_mm = 0, reads_clipped = 0, reads_bad_mm = 0, reads_no_anchor = 0, chains = 0,
+                 calls = 0, calls_direct = 0, calls_chained = 0, calls_direct_off_chain = 0, calls_unplaced = 0,
+                 calls_off_region = 0, calls_no_context = 0;
+
+    void write(std::ostream& os, std::size_t sites) const {
+        os << "reads\t" << reads << "\nreads_no_mm\t" << reads_no_mm << "\nreads_clipped\t" << reads_clipped
+           << "\nreads_bad_mm\t" << reads_bad_mm << "\nreads_no_anchor\t" << reads_no_anchor << "\nchains\t" << chains
+           << "\ncalls\t" << calls << "\ncalls_direct\t" << calls_direct << "\ncalls_chained\t" << calls_chained
+           << "\ncalls_direct_off_chain\t" << calls_direct_off_chain << "\ncalls_unplaced\t" << calls_unplaced
+           << "\ncalls_off_region\t" << calls_off_region << "\ncalls_no_context\t" << calls_no_context
+           << "\nsites\t" << sites << '\n';
+    }
+};
+
+struct SiteKey {
+    std::uint32_t rec; std::int64_t pos; char strand;
+    bool operator<(const SiteKey& o) const {
+        if (rec != o.rec) return rec < o.rec;
+        if (pos != o.pos) return pos < o.pos;
+        return strand < o.strand;
+    }
+};
+struct SiteAcc { const char* ctx = ""; std::int64_t mod = 0, tot = 0, n_direct = 0, n_chained = 0; double psum = 0; };
+
+// Nearest base matching the C's strand (C on '+', G on '-') within +-3 of x;
+// prefers a CpG when the read has one at the call.
+inline std::int64_t snap(const std::string& R, std::int64_t x, char strand, bool want_cpg) {
+    const std::int64_t len = static_cast<std::int64_t>(R.size());
+    for (int pass = want_cpg ? 0 : 1; pass < 2; ++pass) {
+        for (int d : {0, -1, 1, -2, 2, -3, 3}) {
+            const std::int64_t y = x + d;
+            if (y < 0 || y >= len) continue;
+            if (R[static_cast<std::size_t>(y)] != (strand == '+' ? 'C' : 'G')) continue;
+            if (pass == 0) {
+                const std::int64_t mate = strand == '+' ? y + 1 : y - 1;
+                if (mate < 0 || mate >= len || R[static_cast<std::size_t>(mate)] != (strand == '+' ? 'G' : 'C')) continue;
+            }
+            return y;
+        }
+    }
+    return -1;
+}
+
+inline int run(int argc, char* argv[]) {
+    Options o;
+    const int rc = parse_cli(argc, argv, o);
+    if (rc >= 0) return rc;
+
+    std::ifstream rin(o.ref);
+    if (!rin) { std::cerr << "Error: cannot open --ref: " << o.ref << "\n"; return 2; }
+    std::vector<std::string> names, seqs;
+    Reader rr(rin, FileType::FASTA);
+    while (rr.next()) { names.push_back(rr.cur_id); seqs.push_back(rr.cur_seq); }
+    if (seqs.empty()) { std::cerr << "Error: no sequences in --ref: " << o.ref << "\n"; return 2; }
+    const Index idx = build_index(seqs, o.k);
+    const int h = o.k / 2;
+
+    std::ifstream fin;
+    std::istream* inp = &stdin_stream();
+    if (o.infile != "-") {
+        fin.open(o.infile);
+        if (!fin) { std::cerr << "Error: cannot open input: " << o.infile << "\n"; return 2; }
+        inp = &fin;
+    }
+
+    std::map<SiteKey, SiteAcc> sites;
+    Stats st;
+    std::string line, field;
+    std::vector<std::string> f;
+    std::vector<int> ml;
+    std::vector<ModCall> calls;
+    std::vector<Anchor> anchors;
+
+    while (std::getline(*inp, line)) {
+        if (line.empty() || line[0] == '@') continue;
+        f.clear();
+        std::istringstream ls(line);
+        while (std::getline(ls, field, '\t')) f.push_back(field);
+        if (f.size() < 11) { std::cerr << "Error: input is not SAM text (use samtools view)\n"; return 2; }
+        int flag = 0;
+        if (!parse_int(f[1], flag)) { std::cerr << "Error: bad SAM flag: " << f[1] << "\n"; return 2; }
+        if (flag & 0x900) continue;                       // secondary/supplementary: partial copies
+        ++st.reads;
+        std::string mm, mlstr;
+        std::int64_t mn = -1;
+        for (std::size_t t = 11; t < f.size(); ++t) {
+            const std::string& tg = f[t];
+            if (tg.compare(0, 5, "MM:Z:") == 0 || tg.compare(0, 5, "Mm:Z:") == 0) mm = tg.substr(5);
+            else if (tg.compare(0, 5, "ML:B:") == 0 || tg.compare(0, 5, "Ml:B:") == 0) mlstr = tg.substr(5);
+            else if (tg.compare(0, 5, "MN:i:") == 0) { try { mn = std::stoll(tg.substr(5)); } catch (const std::exception&) {} }
+        }
+        if (mm.empty()) { ++st.reads_no_mm; continue; }
+        std::string seq = f[9];
+        if (seq == "*" || f[5].find('H') != std::string::npos ||
+            (mn >= 0 && mn != static_cast<std::int64_t>(seq.size()))) { ++st.reads_clipped; continue; }
+        for (char& c : seq) c = is_acgt(c) ? up(c) : 'N';
+        if (flag & 16) seq = revcomp(seq);                // MM/ML refer to the read as sequenced
+        ml.clear();
+        {
+            std::istringstream ms(mlstr);
+            std::getline(ms, field, ',');                 // element type ('C')
+            while (std::getline(ms, field, ',')) ml.push_back(std::atoi(field.c_str()));
+        }
+        if (!parse_mm_ml(seq, mm, ml, calls)) { ++st.reads_bad_mm; continue; }
+
+        anchors.clear();
+        for_each_kmer(seq, o.k, [&](std::int64_t i, std::uint64_t fwd, std::uint64_t) {
+            if (const Hit* hit = idx.unique(fwd)) anchors.push_back(Anchor{i, *hit});
+        });
+        if (anchors.empty()) { ++st.reads_no_anchor; st.calls_off_region += static_cast<std::int64_t>(calls.size()); continue; }
+        const std::vector<Chain> chains = collinear_chains(anchors, o.k, o.tol, o.min_chain);
+        st.chains += static_cast<std::int64_t>(chains.size());
+        std::int64_t span_lo = INT64_MAX, span_hi = INT64_MIN;
+        for (const Chain& c : chains) { span_lo = std::min(span_lo, c.start); span_hi = std::max(span_hi, c.end); }
+
+        for (const ModCall& mc : calls) {
+            const std::int64_t p = mc.p;
+            ++st.calls;
+            const bool read_cpg = p + 1 < static_cast<std::int64_t>(seq.size()) && seq[static_cast<std::size_t>(p + 1)] == 'G';
+            // direct: unique site-centred k-mer landing on the matching base
+            const Hit* dh = nullptr;
+            std::int64_t dpos = -1;
+            if (p - h >= 0 && p + h < static_cast<std::int64_t>(seq.size())) {
+                std::uint64_t code = 0; bool ok = true;
+                for (std::int64_t q = p - h; q <= p + h; ++q) {
+                    const int b = base2(seq[static_cast<std::size_t>(q)]);
+                    if (b < 0) { ok = false; break; }
+                    code = (code << 2) | static_cast<std::uint64_t>(b);
+                }
+                if (ok && (dh = idx.unique(code)) != nullptr) {
+                    dpos = dh->pos + h;                   // centre: the C ('+') or its G ('-')
+                    if (seqs[dh->rec][static_cast<std::size_t>(dpos)] != (dh->strand == '+' ? 'C' : 'G')) dh = nullptr;
+                }
+            }
+            // chained: nearest anchor of any chain within max_dist
+            const Anchor* near = nullptr;
+            std::int64_t best = o.max_dist + 1;
+            for (const Chain& c : chains) {
+                const std::size_t j = static_cast<std::size_t>(std::lower_bound(c.pos.begin(), c.pos.end(), p) - c.pos.begin());
+                for (std::size_t x : {j - 1, j}) {
+                    if (x < c.pos.size() && std::llabs(c.pos[x] - p) < best) { best = std::llabs(c.pos[x] - p); near = &c.anchors[x]; }
+                }
+            }
+            std::uint32_t rec = 0; std::int64_t c = -1; char strand = '+'; bool direct = false;
+            if (near) {
+                rec = near->h.rec; strand = near->h.strand;
+                c = snap(seqs[rec], plus_coord(*near, p, o.k), strand, read_cpg);
+                direct = dh && dh->rec == rec && dh->strand == strand && dpos == c;
+                if (dh && !direct) ++st.calls_direct_off_chain;
+            } else if (dh && chains.empty()) {
+                rec = dh->rec; strand = dh->strand; c = dpos; direct = true;
+            }
+            if (c < 0) {
+                ++(chains.empty() || p < span_lo || p > span_hi ? st.calls_off_region : st.calls_unplaced);
+                continue;
+            }
+            const char* ctx = context_at(seqs[rec], static_cast<std::size_t>(c), strand);
+            if (!ctx) { ++st.calls_no_context; continue; }
+            SiteKey key{rec, c, strand};
+            if (o.combine && ctx[1] == 'G') key = SiteKey{rec, strand == '+' ? c : c - 1, '.'};
+            SiteAcc& acc = sites[key];
+            acc.ctx = ctx;
+            ++acc.tot;
+            if (mc.prob >= 0.5) ++acc.mod;
+            acc.psum += mc.prob;
+            ++(direct ? acc.n_direct : acc.n_chained);
+            ++(direct ? st.calls_direct : st.calls_chained);
+        }
+    }
+
+    std::ofstream fout;
+    std::ostream* out = &std::cout;
+    if (!o.outfile.empty()) {
+        fout.open(o.outfile);
+        if (!fout) { std::cerr << "Error: cannot open --out: " << o.outfile << "\n"; return 3; }
+        out = &fout;
+    }
+    if (o.header) *out << "seq_id\tpos_1based\tcontext\tstrand\tmod\ttot\tpct\tmean_prob\tn_direct\tn_chained\n";
+    for (const auto& kv : sites) {
+        const SiteAcc& a = kv.second;
+        if (a.tot < o.min_cov) continue;
+        *out << names[kv.first.rec] << '\t' << kv.first.pos + 1 << '\t' << a.ctx << '\t' << kv.first.strand << '\t'
+             << a.mod << '\t' << a.tot << '\t' << std::fixed << std::setprecision(1)
+             << 100.0 * static_cast<double>(a.mod) / static_cast<double>(a.tot) << '\t' << std::setprecision(4)
+             << a.psum / static_cast<double>(a.tot) << '\t' << a.n_direct << '\t' << a.n_chained << '\n';
+    }
+    out->flush();
+    if (!*out) { std::cerr << "Error: failed writing output\n"; return 3; }
+    if (o.infile == "-" && std::ferror(stdin)) { std::cerr << "Error: failed reading stdin; output is incomplete\n"; return 2; }
+
+    if (!o.stats.empty()) {
+        std::ofstream sf(o.stats);
+        st.write(sf, sites.size());
+    }
+    return 0;
+}
+
+} // namespace call
+
 } // namespace rv
 
 int main(int argc, char* argv[]) {
     using namespace rv;
 
     std::ios::sync_with_stdio(false);   // faster std::cout; stdin goes through StdinBuf
+
+    if (argc > 1 && std::string(argv[1]) == "call") return call::run(argc - 1, argv + 1);
 
     Options opt;
     const int cli_rc = parse_cli(argc, argv, opt);

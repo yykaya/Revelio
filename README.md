@@ -25,7 +25,7 @@
 
 [![CI](https://github.com/yykaya/Revelio/actions/workflows/ci.yml/badge.svg)](https://github.com/yykaya/Revelio/actions/workflows/ci.yml)
 
-**Status:** research prototype (v0.3.0) • **Developer:** Yasin Kaya, MPIPZ (ykaya@mpipz.mpg.de | yyasinkkaya@gmail.com) • **License:** MIT
+**Status:** research prototype (v0.4.0) • **Developer:** Yasin Kaya, MPIPZ (ykaya@mpipz.mpg.de | yyasinkkaya@gmail.com) • **License:** MIT
 
 ---
 
@@ -34,6 +34,7 @@
 - **Fast, portable, single binary.** Streams large genomes/reads in one pass.
 - **Both strands.** Reports cytosines on the + and − strand (`--strand both|+|-`).
 - **Window profiles.** `--window`/`--step` summarise a genome or locus into chunks: context counts per strand, GC, CpG o/e and mean prior per window.
+- **Alignment-free methylation calls.** `revelio call` places the 5mC calls of HiFi/ONT reads (SAM `MM`/`ML` tags) on a locus or haplotype with k-mers only, with no aligner.
 - **Context-aware priors.** Pick a quick **heuristic** or supply your own **logistic k-mer weights** with per-context intercepts.
 - **FASTA/FASTQ auto-detection.** Handles multi-line FASTA and 4-line FASTQ.
 - **Practical TSV output**: `seq_id, pos_1based, context, strand, kmer, prob`.
@@ -181,6 +182,38 @@ Chr1:3631-4630  800    1000  200     0.4200  0.3419  3        3         9       
 | `p_CG`, `p_CHG`, `p_CHH` | mean prior per context; `NA` when the window has no such site |
 
 CpG o/e is a sequence-level footprint of methylation history: methylated CpGs mutate to TpG through deamination, so long-term CG methylation depletes CpG. In the example, o/e is high at the 5' end of AT1G01010 (CpG-rich promoter/TSS) and drops to ~0.34 further into the region. Like the per-site priors, it describes the sequence and not the methylation state of a sample.
+
+---
+
+## Alignment-free methylation calls (`revelio call`)
+
+The priors above describe the **sequence**. To see whether a site is actually methylated in a sample, `revelio call` uses long reads that carry per-read 5mC calls: PacBio HiFi (jasmine) or ONT (Dorado), as SAM `MM`/`ML` tags. It places those calls on a reference with k-mers only. `POS`/`CIGAR` are never read, so unaligned BAMs work too.
+
+```bash
+samtools view reads.bam | ./revelio call -r locus.fa --header > calls.tsv
+samtools view -F 0x900 unaligned.bam | ./revelio call -r my_haplotype.fa --min-cov 4 > calls.tsv
+```
+
+How a call is placed:
+
+1. **Index.** Every k-mer (`-k`, default 21) of the reference is indexed on both strands; unique ones become anchors.
+2. **Chain.** A read's anchors are chained collinearly: runs of equal diagonal, joined by DP. A read that crosses an inversion relative to the reference gets one chain per orientation. Small off-chain runs, such as a paralogue-specific k-mer carried over by gene conversion, are dropped.
+3. **Place.** Each call goes to the position predicted by its nearest chain anchor (within `--max-dist`), snapped to the matching base within ±3 bp. It counts as `n_direct` when the k-mer centred on the call is itself unique and agrees with the chain, and as `n_chained` otherwise.
+4. **Pool.** CpGs combine both strands at the + strand C (`strand` = `.`, like pb-CpG-tools; `--no-combine` keeps them apart). CHG/CHH sites, from all-context ONT models, stay strand-specific.
+
+| Column | Description |
+|---|---|
+| `seq_id`, `pos_1based` | reference record and the + strand coordinate of the C (of the G for `-` sites) |
+| `context`, `strand` | CG / CHG / CHH from the reference; `.` = CpG with strands pooled |
+| `mod`, `tot`, `pct` | calls with probability ≥ 0.5, all calls, and 100·mod/tot |
+| `mean_prob` | mean per-read 5mC probability |
+| `n_direct`, `n_chained` | how the calls were placed (see above) |
+
+**Use it on a locus, a haplotype or a small genome.** The index holds every k-mer of `-r` in memory. Because any sequence can be the reference, you can anchor reads to the sample's **own haplotype** or assembly. Sites inside SVs or TE insertions that are missing from the standard reference then get calls too.
+
+**Validation.** On PacBio HiFi data (9 samples, one ~55 kb plant locus), the per-site methylation agreed with an aligned pb-CpG-tools pileup at r = 0.92–0.97 per sample. Coverage per site was the same (median ratio 0.98–1.01). Recall was ~94% of the aligned sites in unique sequence and lower in a near-identical inverted paralogue pair, where only ~20% of CpGs have a unique 21-mer even in the reference. The test suite checks placement against a synthetic data set with known truth: an inverted 99.4%-identical repeat, both strands, unaligned and reverse-complemented records, and sequencing errors (`tests/make_call_fixture.py`).
+
+`--stats` writes how many reads and calls were placed, skipped (secondary/supplementary records, hard clips, `MN` mismatches) or left unplaced.
 
 ---
 
