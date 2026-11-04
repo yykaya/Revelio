@@ -246,8 +246,8 @@ struct Options {
     bool print_header = false;
     int  k = 5;
     std::string strand = "both";    // "both"|"+"|"-"
-    long window = 0;                // > 0: one row per window instead of per site
-    long step = 0;                  // window step (default: window)
+    std::int64_t window = 0;        // > 0: one row per window instead of per site
+    std::int64_t step = 0;          // window step (default: window)
     std::unordered_set<std::string> ctx_filter; // empty = accept all
 };
 
@@ -304,11 +304,11 @@ inline void print_help(std::ostream& os) {
     "  revelio -i genome.fa --heuristic --window 10000 --header > profile.tsv\n";
 }
 
-// Parse a whole-string positive long; false on junk like "abc", "5x" or "0"
-inline bool parse_pos_long(const std::string& s, long& v) {
+// Parse a whole-string positive 64-bit integer; false on junk like "abc", "5x" or "0"
+inline bool parse_pos_i64(const std::string& s, std::int64_t& v) {
     try {
         std::size_t used = 0;
-        v = std::stol(s, &used);
+        v = static_cast<std::int64_t>(std::stoll(s, &used));
         return used == s.size() && v > 0;
     } catch (const std::exception&) {
         return false;
@@ -366,7 +366,7 @@ inline int parse_cli(int argc, char* argv[], Options& opt) {
             }
         } else if (a == "--window" || a == "--step") {
             const std::string v = argv[++i];
-            if (!parse_pos_long(v, a == "--window" ? opt.window : opt.step)) {
+            if (!parse_pos_i64(v, a == "--window" ? opt.window : opt.step)) {
                 std::cerr << "Error: " << a << " expects a positive integer, got '" << v << "'\n";
                 return 1;
             }
@@ -458,13 +458,16 @@ inline void scan_sequence(const std::string& id,
 
 // Per-block tallies for --window; a window is the sum of window/step consecutive blocks
 struct Block {
-    long n_acgt = 0, n_c = 0, n_g = 0, n_cpg = 0;
-    long n[3][2] = {};      // [CG, CHG, CHH][+, -] site counts
-    double psum[3] = {};    // summed prior per context
+    std::int64_t n_acgt = 0, n_c = 0, n_g = 0, n_cpg = 0;
+    std::int64_t n[3][2] = {};  // [CG, CHG, CHH][+, -] site counts
+    double psum[3] = {};        // summed prior per context
 
-    void add(const Block& o) {
-        n_acgt += o.n_acgt; n_c += o.n_c; n_g += o.n_g; n_cpg += o.n_cpg;
-        for (int c = 0; c < 3; ++c) { n[c][0] += o.n[c][0]; n[c][1] += o.n[c][1]; psum[c] += o.psum[c]; }
+    // sign = +1 adds o, -1 removes it (running window sum)
+    void add(const Block& o, int sign = 1) {
+        n_acgt += sign * o.n_acgt; n_c += sign * o.n_c; n_g += sign * o.n_g; n_cpg += sign * o.n_cpg;
+        for (int c = 0; c < 3; ++c) {
+            n[c][0] += sign * o.n[c][0]; n[c][1] += sign * o.n[c][1]; psum[c] += sign * o.psum[c];
+        }
     }
 };
 
@@ -485,15 +488,15 @@ inline void profile_sequence(const std::string& id,
                              const std::unordered_set<std::string>& ctx_filter,
                              bool scan_plus,
                              bool scan_minus,
-                             long window,
-                             long step,
+                             std::int64_t window,
+                             std::int64_t step,
                              std::ostream& out)
 {
-    const long len = static_cast<long>(seq.size());
+    const std::int64_t len = static_cast<std::int64_t>(seq.size());
     if (len == 0) return;
     std::vector<Block> blocks(static_cast<std::size_t>((len + step - 1) / step));
 
-    for (long i = 0; i < len; ++i) {
+    for (std::int64_t i = 0; i < len; ++i) {
         Block& bl = blocks[static_cast<std::size_t>(i / step)];
         const char b = seq[static_cast<std::size_t>(i)];
         if (b == 'N') continue;
@@ -509,12 +512,17 @@ inline void profile_sequence(const std::string& id,
             bl.psum[c] += prob;
         });
 
+    // running sum over blocks j .. j+per_window-1: O(n_blocks) for any overlap
     const std::size_t per_window = static_cast<std::size_t>(window / step);
+    Block w;
+    for (std::size_t q = 0; q < per_window && q < blocks.size(); ++q) w.add(blocks[q]);
     for (std::size_t j = 0; j < blocks.size(); ++j) {
-        Block w;
-        for (std::size_t q = j; q < j + per_window && q < blocks.size(); ++q) w.add(blocks[q]);
-        const long start = static_cast<long>(j) * step;
-        const long end = std::min(start + window, len);
+        if (j > 0) {
+            w.add(blocks[j - 1], -1);
+            if (j + per_window - 1 < blocks.size()) w.add(blocks[j + per_window - 1]);
+        }
+        const std::int64_t start = static_cast<std::int64_t>(j) * step;
+        const std::int64_t end = std::min(start + window, len);
 
         out << id << '\t' << start << '\t' << end << '\t' << w.n_acgt << '\t' << std::fixed << std::setprecision(4);
         if (w.n_acgt > 0) out << static_cast<double>(w.n_c + w.n_g) / static_cast<double>(w.n_acgt);
@@ -527,7 +535,7 @@ inline void profile_sequence(const std::string& id,
         for (int c = 0; c < 3; ++c) out << '\t' << w.n[c][0] << '\t' << w.n[c][1];
         out << std::setprecision(6);
         for (int c = 0; c < 3; ++c) {
-            const long nc = w.n[c][0] + w.n[c][1];
+            const std::int64_t nc = w.n[c][0] + w.n[c][1];
             out << '\t';
             if (nc > 0) out << w.psum[c] / static_cast<double>(nc);
             else out << "NA";
