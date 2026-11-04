@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Draw docs/example_sites.png from the example run (requires matplotlib).
+"""Draw docs/example_sites.png from the example run (requires matplotlib >= 3.6).
 
   ./revelio -i examples/col0_chr1_3631-4630.fa --model weights.tsv --header \
       -o examples/col0_chr1_3631-4630.model.tsv

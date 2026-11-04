@@ -2,7 +2,7 @@
 # ILLUSTRATIVE values to show the format; they are NOT trained on methylation data.
 # Format (TSV, no header):
 #   BIAS   <float>              # optional global bias (logit intercept)
-#   BIAS_<context> <float>      # optional per-context intercept (BIAS_CG / BIAS_CHG / BIAS_CHH)
+#   BIAS_<context> <float>      # optional per-context intercept (BIAS_CG / BIAS_CHG / BIAS_CHH); needs Revelio >= 0.2.0
 #   <context>  <kmer>  <weight> # context in {CG,CHG,CHH}; kmer length must equal -k and be centered on 'C'
 #
 # Probability is computed as: p = 1 / (1 + exp(-(BIAS + BIAS_<context> + weight(context,kmer))))
