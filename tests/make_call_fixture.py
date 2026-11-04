@@ -15,7 +15,10 @@ test checks placement against ground truth:
   call_expected.tsv `revelio call --header` output a perfect caller gives
 
 Every C of a read carries a call (all-context model). CpGs are methylated in
-alternating 50-bp blocks (ML 240 / 15); non-CpG Cs get ML 10.
+alternating 50-bp blocks (ML 240 / 15); non-CpG Cs get ML 10. Every fourth read uses
+multi-entry tags as jasmine/Dorado write them: A+a. (6mA), C+hm? (5hmC and 5mC,
+ML interleaved per position) and T-a. (opposite strand, every third T); only the
+5mC values may be used.
 """
 import gzip
 import os
@@ -70,7 +73,7 @@ sam = ["@HD\tVN:1.6\tSO:unsorted"]
 n = 0
 
 
-def emit(rec, start, end, strand, flag, errors):
+def emit(rec, start, end, strand, flag, errors, multi=False):
     """Simulate one read of ref[start:end]; record expected calls."""
     global n
     ref = refs[rec]
@@ -101,8 +104,18 @@ def emit(rec, start, end, strand, flag, errors):
             e[1] += (v + 0.5) / 256 >= 0.5
             e[2] += 1
             e[3] += (v + 0.5) / 256
-    mm = "C+m?" + "".join(",0" for _ in ml) + ";"
-    mlt = "ML:B:C," + ",".join(map(str, ml))
+    if multi:
+        n_a = read.count("A")
+        n_t = len([i for i, b in enumerate(read) if b == "T"][::3])
+        h = [random.randint(0, 40) for _ in ml]
+        mm = ("A+a." + ",0" * n_a + ";C+hm?" + ",0" * len(ml) + ";T-a." +
+              (",0" + ",2" * (n_t - 1) if n_t else "") + ";")
+        vals = ([random.randint(0, 255) for _ in range(n_a)] + [v for pair in zip(h, ml) for v in pair] +
+                [random.randint(0, 255) for _ in range(n_t)])
+    else:
+        mm = "C+m?" + "".join(",0" for _ in ml) + ";"
+        vals = ml
+    mlt = "ML:B:C," + ",".join(map(str, vals))
     seq = rc(read) if flag & 16 else read          # SAM stores reverse reads as + strand
     n += 1
     sam.append(f"r{n}\t{flag}\t{'*' if flag & 4 else rec}\t{0 if flag & 4 else start + 1}\t{0 if flag & 4 else 60}\t"
@@ -122,7 +135,7 @@ for _ in range(15):
 for k, (rec, a, b) in enumerate(spans):
     strand = "+" if k % 2 == 0 else "-"
     flag = 4 if k % 5 == 4 else (0 if strand == "+" else 16)
-    seq, mm, mlt = emit(rec, a, b, strand, flag, errors=2 if k % 3 == 0 else 0)
+    seq, mm, mlt = emit(rec, a, b, strand, flag, errors=2 if k % 3 == 0 else 0, multi=(k % 4 == 1))
 
 # records that must be ignored (not added to `expected`)
 junk = rand_seq(900)

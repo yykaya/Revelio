@@ -809,6 +809,22 @@ inline int parse_cli(int argc, char* argv[], Options& o) {
     return -1;
 }
 
+// Placement counters (written by --stats); plain fields keep them off the hot path
+struct Stats {
+    std::int64_t reads = 0, reads_no_mm = 0, reads_clipped = 0, reads_bad_mm = 0, reads_no_anchor = 0, chains = 0,
+                 calls = 0, calls_direct = 0, calls_chained = 0, calls_direct_off_chain = 0, calls_unplaced = 0,
+                 calls_off_region = 0, calls_no_context = 0;
+
+    void write(std::ostream& os, std::size_t sites) const {
+        os << "reads\t" << reads << "\nreads_no_mm\t" << reads_no_mm << "\nreads_clipped\t" << reads_clipped
+           << "\nreads_bad_mm\t" << reads_bad_mm << "\nreads_no_anchor\t" << reads_no_anchor << "\nchains\t" << chains
+           << "\ncalls\t" << calls << "\ncalls_direct\t" << calls_direct << "\ncalls_chained\t" << calls_chained
+           << "\ncalls_direct_off_chain\t" << calls_direct_off_chain << "\ncalls_unplaced\t" << calls_unplaced
+           << "\ncalls_off_region\t" << calls_off_region << "\ncalls_no_context\t" << calls_no_context
+           << "\nsites\t" << sites << '\n';
+    }
+};
+
 struct SiteKey {
     std::uint32_t rec; std::int64_t pos; char strand;
     bool operator<(const SiteKey& o) const {
@@ -861,7 +877,7 @@ inline int run(int argc, char* argv[]) {
     }
 
     std::map<SiteKey, SiteAcc> sites;
-    std::map<std::string, std::int64_t> st;
+    Stats st;
     std::string line, field;
     std::vector<std::string> f;
     std::vector<int> ml;
@@ -877,7 +893,7 @@ inline int run(int argc, char* argv[]) {
         int flag = 0;
         if (!parse_int(f[1], flag)) { std::cerr << "Error: bad SAM flag: " << f[1] << "\n"; return 2; }
         if (flag & 0x900) continue;                       // secondary/supplementary: partial copies
-        ++st["reads"];
+        ++st.reads;
         std::string mm, mlstr;
         std::int64_t mn = -1;
         for (std::size_t t = 11; t < f.size(); ++t) {
@@ -886,10 +902,10 @@ inline int run(int argc, char* argv[]) {
             else if (tg.compare(0, 5, "ML:B:") == 0 || tg.compare(0, 5, "Ml:B:") == 0) mlstr = tg.substr(5);
             else if (tg.compare(0, 5, "MN:i:") == 0) { try { mn = std::stoll(tg.substr(5)); } catch (const std::exception&) {} }
         }
-        if (mm.empty()) { ++st["reads_no_mm"]; continue; }
+        if (mm.empty()) { ++st.reads_no_mm; continue; }
         std::string seq = f[9];
         if (seq == "*" || f[5].find('H') != std::string::npos ||
-            (mn >= 0 && mn != static_cast<std::int64_t>(seq.size()))) { ++st["reads_clipped"]; continue; }
+            (mn >= 0 && mn != static_cast<std::int64_t>(seq.size()))) { ++st.reads_clipped; continue; }
         for (char& c : seq) c = is_acgt(c) ? up(c) : 'N';
         if (flag & 16) seq = revcomp(seq);                // MM/ML refer to the read as sequenced
         ml.clear();
@@ -898,21 +914,21 @@ inline int run(int argc, char* argv[]) {
             std::getline(ms, field, ',');                 // element type ('C')
             while (std::getline(ms, field, ',')) ml.push_back(std::atoi(field.c_str()));
         }
-        if (!parse_mm_ml(seq, mm, ml, calls)) { ++st["reads_bad_mm"]; continue; }
+        if (!parse_mm_ml(seq, mm, ml, calls)) { ++st.reads_bad_mm; continue; }
 
         anchors.clear();
         for_each_kmer(seq, o.k, [&](std::int64_t i, std::uint64_t fwd, std::uint64_t) {
             if (const Hit* hit = idx.unique(fwd)) anchors.push_back(Anchor{i, *hit});
         });
-        if (anchors.empty()) { ++st["reads_no_anchor"]; st["calls_off_region"] += static_cast<std::int64_t>(calls.size()); continue; }
+        if (anchors.empty()) { ++st.reads_no_anchor; st.calls_off_region += static_cast<std::int64_t>(calls.size()); continue; }
         const std::vector<Chain> chains = collinear_chains(anchors, o.k, o.tol, o.min_chain);
-        st["chains"] += static_cast<std::int64_t>(chains.size());
+        st.chains += static_cast<std::int64_t>(chains.size());
         std::int64_t span_lo = INT64_MAX, span_hi = INT64_MIN;
         for (const Chain& c : chains) { span_lo = std::min(span_lo, c.start); span_hi = std::max(span_hi, c.end); }
 
         for (const ModCall& mc : calls) {
             const std::int64_t p = mc.p;
-            ++st["calls"];
+            ++st.calls;
             const bool read_cpg = p + 1 < static_cast<std::int64_t>(seq.size()) && seq[static_cast<std::size_t>(p + 1)] == 'G';
             // direct: unique site-centred k-mer landing on the matching base
             const Hit* dh = nullptr;
@@ -943,16 +959,16 @@ inline int run(int argc, char* argv[]) {
                 rec = near->h.rec; strand = near->h.strand;
                 c = snap(seqs[rec], plus_coord(*near, p, o.k), strand, read_cpg);
                 direct = dh && dh->rec == rec && dh->strand == strand && dpos == c;
-                if (dh && !direct) ++st["calls_direct_off_chain"];
+                if (dh && !direct) ++st.calls_direct_off_chain;
             } else if (dh && chains.empty()) {
                 rec = dh->rec; strand = dh->strand; c = dpos; direct = true;
             }
             if (c < 0) {
-                ++st[chains.empty() || p < span_lo || p > span_hi ? "calls_off_region" : "calls_unplaced"];
+                ++(chains.empty() || p < span_lo || p > span_hi ? st.calls_off_region : st.calls_unplaced);
                 continue;
             }
             const char* ctx = context_at(seqs[rec], static_cast<std::size_t>(c), strand);
-            if (!ctx) { ++st["calls_no_context"]; continue; }
+            if (!ctx) { ++st.calls_no_context; continue; }
             SiteKey key{rec, c, strand};
             if (o.combine && ctx[1] == 'G') key = SiteKey{rec, strand == '+' ? c : c - 1, '.'};
             SiteAcc& acc = sites[key];
@@ -961,7 +977,7 @@ inline int run(int argc, char* argv[]) {
             if (mc.prob >= 0.5) ++acc.mod;
             acc.psum += mc.prob;
             ++(direct ? acc.n_direct : acc.n_chained);
-            ++st[direct ? "calls_direct" : "calls_chained"];
+            ++(direct ? st.calls_direct : st.calls_chained);
         }
     }
 
@@ -987,11 +1003,7 @@ inline int run(int argc, char* argv[]) {
 
     if (!o.stats.empty()) {
         std::ofstream sf(o.stats);
-        const char* keys[] = {"reads", "reads_no_mm", "reads_clipped", "reads_bad_mm", "reads_no_anchor", "chains",
-                              "calls", "calls_direct", "calls_chained", "calls_direct_off_chain", "calls_unplaced",
-                              "calls_off_region", "calls_no_context"};
-        for (const char* k : keys) sf << k << '\t' << st[k] << '\n';
-        sf << "sites\t" << sites.size() << '\n';
+        st.write(sf, sites.size());
     }
     return 0;
 }
