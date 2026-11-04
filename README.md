@@ -103,7 +103,7 @@ zcat genome.fa.gz | ./revelio -i - --heuristic > calls.tsv
 ```bash
 ./revelio -i examples/col0_chr1_3631-4630.fa --model weights.tsv --header \
     -o examples/col0_chr1_3631-4630.model.tsv
-python3 docs/make_example_figure.py   # redraws docs/example_sites.png (needs matplotlib)
+python3 docs/make_example_figure.py   # redraws docs/example_sites.png (needs matplotlib >= 3.6)
 ```
 
 ![Revelio example: cytosine contexts on both strands and per-site prior probabilities](docs/example_sites.png)
@@ -194,7 +194,7 @@ Guidelines:
 - `context ∈ {CG, CHG, CHH}`
 - `kmer` length must equal `-k`, be DNA (A/C/G/T), and have the cytosine in the middle.
 - Use **`BIAS`** to shift all logits up/down (a global intercept).
-- Use **`BIAS_CG` / `BIAS_CHG` / `BIAS_CHH`** to give each context its own intercept, so unlisted k-mers keep the expected CG > CHG > CHH ordering.
+- Use **`BIAS_CG` / `BIAS_CHG` / `BIAS_CHH`** to give each context its own intercept, so unlisted k-mers keep the expected CG > CHG > CHH ordering. These rows need Revelio ≥ 0.2.0: older versions silently read them as the global `BIAS` (see [CHANGELOG](CHANGELOG.md)).
 - The bundled [`weights.tsv`](weights.tsv) holds **illustrative** values for k = 5, not weights trained on methylation data.
 
 ---
