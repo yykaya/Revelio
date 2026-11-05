@@ -9,19 +9,22 @@
   - Extract a centered k-mer (odd k, default k=5).
   - Predict methylation probability via:
       (A) heuristic priors (CG > CHG > CHH), or
-      (B) logistic regression weights: prob = sigmoid(bias + w[context,kmer]).
+      (B) logistic regression weights: prob = sigmoid(BIAS + BIAS_<context> + w[context,kmer]).
   - Outputs TSV: seq_id  pos_1based  context  strand  kmer  prob
   - FASTA (multi-line) and FASTQ (4-line) support with auto-detection; reads pipes/stdin.
   - Practical CLI: --header, --contexts, --out, --version.
   - --window/--step: per-window profiles (context counts per strand, GC, CpG o/e, mean prior).
   - seq_id is the header up to the first whitespace.
+  - `revelio call`: places the per-read 5mC calls of HiFi/ONT reads (SAM MM/ML tags) on a
+    locus or haplotype by unique k-mer anchors and collinear chaining, with no aligner.
 
   Notes / Limitations
   - Minus-strand sites are reported at the + strand coordinate of their G, with the k-mer
     and context read 5'->3' on the minus strand.
   - Ambiguity (non-ACGT) breaks context; such windows are skipped.
-  - This is a fast *sequence-context prior*. It does NOT analyze raw signal.
-    For signal-level methylation (e.g., ONT), see deep learning tools such as DeepSignal-plant.
+  - The default mode is a fast *sequence-context prior*. Revelio never analyzes raw signal:
+    `revelio call` reuses the per-read calls of signal-level callers (jasmine, Dorado).
+  - `revelio call` keeps a k-mer index of the whole reference in memory (~190 bytes/bp).
 */
 
 #include <iostream>

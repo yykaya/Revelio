@@ -16,7 +16,7 @@
       signal-level methylation callers.
       <br><br>
       <blockquote>⚠️ Revelio uses <strong>sequence context only</strong> (no raw signal). For
-      signal-level calling on ONT data, use tools such as Remora/Dorado, Megalodon, or DeepSignal-plant.</blockquote>
+      signal-level calling, use jasmine (PacBio HiFi) or Remora/Dorado, Megalodon, DeepSignal-plant (ONT); <code>revelio call</code> can then place those per-read calls on a locus or haplotype.</blockquote>
     </td>
   </tr>
 </table>
@@ -290,19 +290,21 @@ Guidelines:
 - Compile with `-O3 -march=native` on a recent compiler.
 - Prefer smaller odd `-k` (5 or 7) for speed; larger `k` can improve specificity but increases table size and cache pressure.
 - Stream from disk or stdin. Records are processed one at a time, so peak memory is about the size of the largest sequence (e.g. one chromosome).
+- `revelio call` is different: it indexes the whole `-r` reference, at about 190 bytes per base (~1.9 GB for 10 Mb). Keep `-r` to a locus, haplotype or small genome, and split larger targets by region.
 
 ---
 
 ## How Revelio fits in your pipeline
 
 - Use Revelio to **pre-rank** CG/CHG/CHH sites or **flag hotspots** before signal-level callers.
-- For **ground-truth methylation** on ONT data, switch to **Remora/Dorado**, **Megalodon**, or **DeepSignal-plant** and then reconcile with Revelio’s ranked candidates.
+- For **measured methylation**, call 5mC with **jasmine** (PacBio HiFi) or **Dorado/Remora** (ONT). Then either align and pile up as usual, or run `revelio call` on the modBAM to place the calls on a locus or the sample's own haplotype without an aligner.
+- Compare `revelio call` output with the priors or window profiles of the same reference to see where the sequence-based expectation and the observed methylation differ.
 
 ---
 
 ## Roadmap
 
-- Duplex-aware reporting (merge the two C's of a CG into one row)
+- Merge the two C's of a CpG into one row in the prior and window modes (`revelio call` already pools them)
 - Optional BED/BEDMethyl output
 - Native gzip input
 - Pluggable k-mer featurizers (e.g., degeneracy, repeats)
