@@ -119,6 +119,12 @@ done
 "$BIN" -i "$EX" --heuristic --window 100 --step 50 | awk -F'\t' '$3-$2==100{print $2, $7+$8+$9+$10+$11+$12}' > "$TMP/w100"
 "$BIN" -i "$EX" --heuristic --window 50 | awk -F'\t' '{n[$2]=$7+$8+$9+$10+$11+$12} END{for(s in n) print s, n[s]}' > "$TMP/w50"
 if awk 'NR==FNR{h[$1]=$2; next} {if(h[$1]+h[$1+50]!=$2) bad++} END{exit bad>0}' "$TMP/w50" "$TMP/w100"; then ok "--step windows = sum of blocks"; else bad "--step windows = sum of blocks"; fi
+# --per-record: one row per record (hand-checked: chr1 6 C, 3 G, 1 CpG -> o/e 22/18),
+# identical to a window longer than every record
+printf 'chr1\t0\t22\t22\t0.4091\t1.2222\t1\t1\t2\t2\t3\t0\t0.850000\t0.550000\t0.250000\nchr2\t0\t6\t6\t0.6667\t2.0000\t1\t1\t0\t0\t0\t0\t0.850000\tNA\tNA\n' > "$TMP/exp_rec.tsv"
+expect_out "--per-record (multi-record)"      "$TMP/exp_rec.tsv" "$BIN" -i "$TMP/t.fa" --heuristic --per-record
+"$BIN" -i "$EX" --model "$WT" --window 1000000000 --header > "$TMP/rec_win.tsv"
+expect_out "--per-record = window > record"   "$TMP/rec_win.tsv" "$BIN" -i "$EX" --model "$WT" --per-record --header
 
 # ---- revelio call: synthetic reads with known truth (tests/make_call_fixture.py) ----
 DATA=$(dirname "$0")/data
@@ -156,6 +162,7 @@ expect_rc "unknown BIAS_ row exits 2"      2 "$BIN" -i "$TMP/t.fa" --model "$TMP
 expect_rc "--step without --window exits 1"  1 "$BIN" -i "$TMP/t.fa" --step 5
 expect_rc "--window not multiple of step"   1 "$BIN" -i "$TMP/t.fa" --window 10 --step 3
 expect_rc "--window 0 exits 1"              1 "$BIN" -i "$TMP/t.fa" --window 0
+expect_rc "--per-record + --window exits 1" 1 "$BIN" -i "$TMP/t.fa" --per-record --window 10
 expect_rc "--heuristic + --model exits 1"  1 "$BIN" -i "$TMP/t.fa" --heuristic --model "$TMP/w5.tsv"
 
 echo "# $pass passed, $fail failed"
