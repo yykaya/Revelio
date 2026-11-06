@@ -14,6 +14,7 @@
   - FASTA (multi-line) and FASTQ (4-line) support with auto-detection; reads pipes/stdin.
   - Practical CLI: --header, --contexts, --out, --version.
   - --window/--step: per-window profiles (context counts per strand, GC, CpG o/e, mean prior).
+  - --per-record: the same profile, one row per record (assembly contig/chromosome summary).
   - seq_id is the header up to the first whitespace.
   - `revelio call`: places the per-read 5mC calls of HiFi/ONT reads (SAM MM/ML tags) on a
     locus or haplotype by unique k-mer anchors and collinear chaining, with no aligner.
@@ -279,6 +280,7 @@ struct Options {
     std::string strand = "both";    // "both"|"+"|"-"
     std::int64_t window = 0;        // > 0: one row per window instead of per site
     std::int64_t step = 0;          // window step (default: window)
+    bool per_record = false;        // one profile row per record (window = record length)
     std::unordered_set<std::string> ctx_filter; // empty = accept all
 };
 
@@ -319,14 +321,15 @@ inline void print_help(std::ostream& os) {
     "      --strand <s>        both | + | - (default: both)\n"
     "      --window <bp>       Write one profile row per window instead of one row per site\n"
     "      --step <bp>         Window step (default: --window; --window must be a multiple)\n"
+    "      --per-record        Write one profile row per record (e.g. per contig of an assembly)\n"
     "      --header            Print header line in TSV output\n"
     "  -o, --out <path>        Write to file (default: stdout)\n"
     "  -h, --help              Show help and exit\n"
     "      --version           Show version and exit\n"
     "\n"
     "Output columns (TSV): seq_id  pos_1based  context  strand  kmer  prob\n"
-    "With --window:        seq_id  start  end  n_acgt  gc  cpg_oe  CG_plus  CG_minus\n"
-    "                      CHG_plus  CHG_minus  CHH_plus  CHH_minus  p_CG  p_CHG  p_CHH\n"
+    "With --window/--per-record: seq_id  start  end  n_acgt  gc  cpg_oe  CG_plus  CG_minus\n"
+    "                            CHG_plus  CHG_minus  CHH_plus  CHH_minus  p_CG  p_CHG  p_CHH\n"
     "\n"
     "Subcommands:\n"
     "  revelio call ...        Alignment-free 5mC calls from MM/ML-tagged reads (see revelio call --help)\n"
@@ -335,7 +338,8 @@ inline void print_help(std::ostream& os) {
     "  revelio -i genome.fa --heuristic > calls.tsv\n"
     "  zcat genome.fa.gz | revelio -i - --heuristic > calls.tsv\n"
     "  revelio -i reads.fq --fastq --model weights.tsv -k 7 --header --out calls.tsv\n"
-    "  revelio -i genome.fa --heuristic --window 10000 --header > profile.tsv\n";
+    "  revelio -i genome.fa --heuristic --window 10000 --header > profile.tsv\n"
+    "  revelio -i assembly.fa --heuristic --per-record --header > contigs.tsv\n";
 }
 
 // Parse a whole-string positive 64-bit integer; false on junk like "abc", "5x" or "0"
@@ -404,6 +408,8 @@ inline int parse_cli(int argc, char* argv[], Options& opt) {
                 std::cerr << "Error: " << a << " expects a positive integer, got '" << v << "'\n";
                 return 1;
             }
+        } else if (a == "--per-record") {
+            opt.per_record = true;
         } else if (a == "-o" || a == "--out") {
             opt.outfile = argv[++i];
         } else if (a == "-h" || a == "--help") {
@@ -1031,6 +1037,10 @@ int main(int argc, char* argv[]) {
         print_help(std::cerr);
         return 1;
     }
+    if (opt.per_record && (opt.window > 0 || opt.step > 0)) {
+        std::cerr << "Error: --per-record and --window/--step are mutually exclusive\n";
+        return 1;
+    }
     if (opt.step > 0 && opt.window == 0) {
         std::cerr << "Error: --step needs --window\n";
         return 1;
@@ -1119,14 +1129,19 @@ int main(int argc, char* argv[]) {
     }
 
     if (opt.print_header) {
-        if (opt.window > 0) print_profile_header(*out);
+        if (opt.window > 0 || opt.per_record) print_profile_header(*out);
         else *out << "seq_id\tpos_1based\tcontext\tstrand\tkmer\tprob\n";
     }
 
     // Read and scan
     Reader rdr(in, ft);
     while (rdr.next()) {
-        if (opt.window > 0)
+        if (opt.per_record) {
+            // one window spanning the record; same counts as --window >= record length
+            const auto len = static_cast<std::int64_t>(rdr.cur_seq.size());
+            profile_sequence(rdr.cur_id, rdr.cur_seq, opt.k, predictor, opt.ctx_filter,
+                             opt.strand != "-", opt.strand != "+", len, len, *out);
+        } else if (opt.window > 0)
             profile_sequence(rdr.cur_id, rdr.cur_seq, opt.k, predictor, opt.ctx_filter,
                              opt.strand != "-", opt.strand != "+", opt.window, opt.step, *out);
         else

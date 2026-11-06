@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`--per-record`**: one profile row per record (contig/chromosome) with the `--window` columns, for assembly summaries. Same counts as a window longer than the record.
+
 ## 0.4.0 — 2026-11-04
 
 - **`revelio call`**: alignment-free 5mC calls from MM/ML-tagged long reads (PacBio HiFi, ONT). Calls are placed on any reference (locus, haplotype, small genome) via unique k-mer anchors and collinear chaining; CpG strands are pooled, CHG/CHH stay stranded. Unaligned BAMs work (`samtools view | revelio call`). Secondary/supplementary records, hard-clipped reads and `MN` mismatches are skipped.

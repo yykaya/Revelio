@@ -33,7 +33,7 @@
 
 - **Fast, portable, single binary.** Streams large genomes/reads in one pass.
 - **Both strands.** Reports cytosines on the + and − strand (`--strand both|+|-`).
-- **Window profiles.** `--window`/`--step` summarise a genome or locus into chunks: context counts per strand, GC, CpG o/e and mean prior per window.
+- **Window profiles.** `--window`/`--step` summarise a genome or locus into chunks: context counts per strand, GC, CpG o/e and mean prior per window. `--per-record` gives one such row per contig of an assembly.
 - **Alignment-free methylation calls.** `revelio call` places the 5mC calls of HiFi/ONT reads (SAM `MM`/`ML` tags) on a locus or haplotype with k-mers only, with no aligner.
 - **Context-aware priors.** Pick a quick **heuristic** or supply your own **logistic k-mer weights** with per-context intercepts.
 - **FASTA/FASTQ auto-detection.** Handles multi-line FASTA and 4-line FASTQ.
@@ -180,6 +180,12 @@ Chr1:3631-4630  800    1000  200     0.4200  0.3419  3        3         9       
 | `cpg_oe` | CpG observed/expected = n(CG)·n_acgt / (n(C)·n(G)) (Gardiner-Garden & Frommer 1987); `NA` without C or G |
 | `CG_plus` … `CHH_minus` | site counts per context and strand |
 | `p_CG`, `p_CHG`, `p_CHH` | mean prior per context; `NA` when the window has no such site |
+
+**Assemblies.** `--per-record` writes the same columns with one row per record, i.e. per contig or chromosome (`start` = 0, `end` = record length). This gives a quick per-contig summary for QC or for comparing assemblies. `end` − `n_acgt` is the number of N bases.
+
+```bash
+./revelio -i assembly.fa --heuristic --per-record --header > contigs.tsv
+```
 
 CpG o/e is a sequence-level footprint of methylation history: methylated CpGs mutate to TpG through deamination, so long-term CG methylation depletes CpG. In the example, o/e is high at the 5' end of AT1G01010 (CpG-rich promoter/TSS) and drops to ~0.34 further into the region. Like the per-site priors, it describes the sequence and not the methylation state of a sample.
 
